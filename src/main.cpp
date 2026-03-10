@@ -10,8 +10,8 @@
 /*=============INITIALIZE OBJECT=============*/
 MPU6050 mpu(Wire);
 
-/*==CONVERSION CONSTANT FROM m/s² TO G (GRAVITY)==*/
-const float G_TO_MS2 = 9.80665;
+/*=========THRESHOLD FALL DETECTION==========*/
+#define THRESHOLD_FALL_DETECTION 2.0
 
 /*=================SETUP====================*/
 void setup() {
