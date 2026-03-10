@@ -16,8 +16,12 @@ void setup() {
   Serial.begin(115200);
 
   // Wait for Serial to be ready
-  while(!Serial);
+  while (!Serial);
 
   // Initialize I2C
   Wire.begin();
+
+  // Initialize Sensor
+  mpu.begin();
+  
 }
