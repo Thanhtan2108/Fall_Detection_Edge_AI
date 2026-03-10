@@ -36,6 +36,9 @@ void setup() {
   // Thanh ghi SMPLRT_DIV (0x19) mặc định 0x00 => sample rate 1kHz
   Serial.println("MPU6050 initialized with ±8G and 21Hz filter");
 
+  // cablirate sensor
+  mpu.calcGyroOffsets(true);
+
   // Initialize Buzzer Pin
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
