@@ -9,3 +9,13 @@ MPU6050 mpu(Wire);
 
 /*==CONVERSION CONSTANT FROM m/s² TO G (GRAVITY)==*/
 const float G_TO_MS2 = 9.80665;
+
+/*=================SETUP====================*/
+void setup() {
+  // Initialize Serial
+  Serial.begin(115200);
+
+  // Wait for Serial to be ready
+  while(!Serial);
+
+}
