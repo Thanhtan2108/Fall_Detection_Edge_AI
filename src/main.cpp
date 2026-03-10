@@ -4,6 +4,9 @@
 #include <MPU6050_tockn.h>
 #include <Wire.h>
 
+/*=============DEFINE PIN====================*/
+#define BUZZER_PIN 18
+
 /*=============INITIALIZE OBJECT=============*/
 MPU6050 mpu(Wire);
 
@@ -33,4 +36,7 @@ void setup() {
   // Thanh ghi SMPLRT_DIV (0x19) mặc định 0x00 => sample rate 1kHz
   Serial.println("MPU6050 initialized with ±8G and 21Hz filter");
 
+  // Initialize Buzzer Pin
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
 }
