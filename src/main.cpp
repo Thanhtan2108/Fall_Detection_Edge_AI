@@ -24,4 +24,13 @@ void setup() {
   // Initialize Sensor
   mpu.begin();
   
+  // Cấu hình lại dải đo và bộ lọc
+  // Thanh ghi ACCEL_CONFIG (0x1C): set AFS_SEL=2 (0x10) cho ±8G
+  mpu.writeMPU6050(0x1C, 0x10);
+  // Thanh ghi CONFIG (0x1A): set DLPF_CFG=4 (0x04) cho 21Hz
+  mpu.writeMPU6050(0x1A, 0x04);
+  // Thanh ghi GYRO_CONFIG đã được set ±500°/s (0x08) trong begin(), giữ nguyên
+  // Thanh ghi SMPLRT_DIV (0x19) mặc định 0x00 => sample rate 1kHz
+  Serial.println("MPU6050 initialized with ±8G and 21Hz filter");
+
 }
