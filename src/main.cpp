@@ -43,3 +43,9 @@ void setup() {
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
 }
+
+/*=================LOOP====================*/
+void loop() {
+  // update new data from sensor
+  mpu.update();
+}
