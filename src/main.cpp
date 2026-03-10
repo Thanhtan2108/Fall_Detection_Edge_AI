@@ -48,4 +48,20 @@ void setup() {
 void loop() {
   // update new data from sensor
   mpu.update();
+  Serial.println();
+
+  // read accel value (unit : G)
+  float accX_g = mpu.getAccX();
+  float accY_g = mpu.getAccY();
+  float accZ_g = mpu.getAccZ();
+
+  Serial.print("Acceleration X: ");
+  Serial.print(accX_g);
+  Serial.print(" G, Y: ");
+  Serial.print(accY_g);
+  Serial.print(" G, Z: ");
+  Serial.print(accZ_g);
+  Serial.println(" G");
+
+  delay(100);
 }
