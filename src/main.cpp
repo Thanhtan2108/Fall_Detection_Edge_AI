@@ -18,4 +18,6 @@ void setup() {
   // Wait for Serial to be ready
   while(!Serial);
 
+  // Initialize I2C
+  Wire.begin();
 }
