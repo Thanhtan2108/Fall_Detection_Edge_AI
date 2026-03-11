@@ -63,5 +63,5 @@ void loop() {
   Serial.print(accZ_g);
   Serial.println(" G");
 
-  delay(100);
+  delay(20);
 }
