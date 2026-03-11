@@ -63,9 +63,5 @@ void loop() {
   Serial.print(accZ_g);
   Serial.println(" G");
 
-  float accTotal = sqrt(accX_g * accX_g + accY_g * accY_g + accZ_g * accZ_g);
-  Serial.print("Acceleration Total: ");
-  Serial.println(accTotal);
-
   delay(100);
 }
