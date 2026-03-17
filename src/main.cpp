@@ -3,9 +3,10 @@
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <Fall_Detection_inferencing.h>
+#include <WiFi.h>
 
 // ============================================================
-//  PIN
+//  PIN DEFINITIONS
 // ============================================================
 #define BUZZER_PIN   18
 #define LED_PIN       2
@@ -13,41 +14,56 @@
 #define SCL_PIN      22
 
 // ============================================================
-//  CẤU HÌNH
+//  SENSOR & AI CONFIGURATION
 // ============================================================
 #define SAMPLE_RATE_HZ      25
 #define SAMPLE_INTERVAL_MS  (1000 / SAMPLE_RATE_HZ)  // 40ms
 #define BUZZER_DURATION_MS  3000
 #define FALL_THRESHOLD      0.70f
-
-// Stride = 200ms = 5 samples × 3 axes = 15 floats
 #define STRIDE_SAMPLES      5
 #define STRIDE_FLOATS       (STRIDE_SAMPLES * 3)      // 15
 #define WINDOW_FLOATS       EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE  // 150
 
 // ============================================================
-//  GLOBALS
+//  WI-FI CONFIGURATION
+// ============================================================
+const char* WIFI_SSID = "Thanhtan";
+const char* WIFI_PASS = "12345678";
+const int   WIFI_TIMEOUT = 10000;  // 10 giây timeout kết nối
+
+// ============================================================
+//  GLOBAL VARIABLES
 // ============================================================
 Adafruit_MPU6050 mpu;
 
-float         features[WINDOW_FLOATS];
-int           samples_collected = 0;    // đếm số samples từ 0 → 50
-bool          buffer_full       = false;
-int           stride_count      = 0;    // đếm samples sau mỗi stride
+float features[WINDOW_FLOATS];
+int   samples_collected = 0;
+bool  buffer_full       = false;
+int   stride_count      = 0;
 
 unsigned long last_sample_ms    = 0;
 unsigned long buzzer_start_ms   = 0;
 bool          buzzer_on         = false;
 
-// ============================================================
-//  CALLBACK
-// ============================================================
-int get_signal_data(size_t offset, size_t length, float* out_ptr) {
-    memcpy(out_ptr, features + offset, length * sizeof(float));
-    return EIDSP_OK;
-}
+// Biến trạng thái gửi cảnh báo (dùng để tránh gửi nhiều lần cho một sự kiện)
+bool alert_sent_for_current_fall = false;
+bool wifi_enabled = false;
 
+// Biến cho kiểm tra WiFi định kỳ (có thể bỏ nếu không cần)
+unsigned long lastWiFiCheck = 0;
+const unsigned long WIFI_CHECK_INTERVAL = 60000; // 60 giây
+
+// ============================================================
+//  FUNCTION PROTOTYPES
+// ============================================================
+int  get_signal_data(size_t offset, size_t length, float* out_ptr);
 void run_inference();
+void initWiFi();
+bool connectWiFi();
+void disconnectWiFi();
+void enableWiFi();
+void disableWiFi();
+void performWiFiCheck();           // Hàm kiểm tra WiFi định kỳ (tùy chọn)
 
 // ============================================================
 //  SETUP
@@ -56,14 +72,19 @@ void setup() {
     Serial.begin(115200);
     delay(500);
 
+    // Tiết kiệm năng lượng: giảm tần số CPU
+    setCpuFrequencyMhz(80);
+    Serial.printf("CPU frequency set to %d MHz\n", getCpuFrequencyMhz());
+
     pinMode(LED_PIN,    OUTPUT);
     pinMode(BUZZER_PIN, OUTPUT);
     digitalWrite(LED_PIN,    LOW);
     digitalWrite(BUZZER_PIN, LOW);
 
+    // Khởi tạo I2C và MPU6050
     Wire.begin(SDA_PIN, SCL_PIN);
     if (!mpu.begin()) {
-        Serial.println("❌ Không tìm thấy MPU6050!");
+        Serial.println("❌ MPU6050 not found!");
         while (true) {
             digitalWrite(LED_PIN, !digitalRead(LED_PIN));
             delay(1000);
@@ -74,41 +95,51 @@ void setup() {
     mpu.setGyroRange(MPU6050_RANGE_500_DEG);
     mpu.setFilterBandwidth(MPU6050_BAND_10_HZ);
 
-    Serial.println("✅ Fall Detection Ready");
+    // WiFi ở chế độ tắt ngay từ đầu
+    initWiFi();
+
+    Serial.println("✅ Fall Detection System Ready");
     Serial.printf("   Buffer size : %d floats (%d samples)\n",
                   WINDOW_FLOATS, WINDOW_FLOATS / 3);
     Serial.printf("   Sample rate : %d Hz\n", SAMPLE_RATE_HZ);
-    Serial.printf("   Threshold   : %.0f%%\n", FALL_THRESHOLD * 100);
-    Serial.println("   Đang tích lũy buffer lần đầu (2 giây)...");
+    Serial.printf("   Fall threshold: %.0f%%\n", FALL_THRESHOLD * 100);
+    Serial.println("   Filling initial buffer (2 seconds)...");
 }
 
 // ============================================================
-//  LOOP
+//  MAIN LOOP
 // ============================================================
 void loop() {
     unsigned long now = millis();
 
-    // ── Tắt buzzer sau 3 giây ─────────────────────────────
-    if (buzzer_on && now - buzzer_start_ms >= BUZZER_DURATION_MS) {
+    // Xử lý tắt buzzer sau thời gian quy định
+    if (buzzer_on && (now - buzzer_start_ms >= BUZZER_DURATION_MS)) {
         digitalWrite(BUZZER_PIN, LOW);
         digitalWrite(LED_PIN,    LOW);
         buzzer_on = false;
-        Serial.println("🔕 Buzzer OFF");
+        Serial.println("🔕 Buzzer turned off");
     }
 
-    // ── Giới hạn 25Hz ─────────────────────────────────────
+    // (Tùy chọn) Kiểm tra WiFi định kỳ - có thể bỏ comment nếu muốn
+    // if (!buzzer_on && (now - lastWiFiCheck >= WIFI_CHECK_INTERVAL)) {
+    //     lastWiFiCheck = now;
+    //     performWiFiCheck();
+    // }
+
+    // Đảm bảo tốc độ lấy mẫu 25Hz
     if (now - last_sample_ms < SAMPLE_INTERVAL_MS) return;
     last_sample_ms = now;
 
-    // ── Đọc MPU6050 ───────────────────────────────────────
+    // Đọc dữ liệu từ MPU6050
     sensors_event_t a, g, temp;
     mpu.getEvent(&a, &g, &temp);
 
+    // Chuyển đổi sang đơn vị G (trọng lực)
     float x = a.acceleration.x / 9.80665f;
     float y = a.acceleration.y / 9.80665f;
     float z = a.acceleration.z / 9.80665f;
 
-    // ── Giai đoạn 1: Tích lũy buffer lần đầu ─────────────
+    // ----- GIAI ĐOẠN 1: TÍCH LŨY BUFFER LẦN ĐẦU -----
     if (!buffer_full) {
         int idx = samples_collected * 3;
         features[idx]     = x;
@@ -119,37 +150,32 @@ void loop() {
         if (samples_collected >= WINDOW_FLOATS / 3) {
             buffer_full = true;
             stride_count = 0;
-            Serial.println("   Buffer đầy — bắt đầu inference!");
+            Serial.println("   Buffer full — starting inference!");
             run_inference();
         }
         return;
     }
 
-    // ── Giai đoạn 2: Sliding window sau khi buffer đầy ────
-    // Tích lũy đủ STRIDE_SAMPLES thì mới slide và inference
-    // Lưu tạm vào cuối buffer (overwrite phần stride cũ)
-    int write_idx = WINDOW_FLOATS - STRIDE_FLOATS
-                    + stride_count * 3;
+    // ----- GIAI ĐOẠN 2: SLIDING WINDOW -----
+    int write_idx = WINDOW_FLOATS - STRIDE_FLOATS + stride_count * 3;
     features[write_idx]     = x;
     features[write_idx + 1] = y;
     features[write_idx + 2] = z;
     stride_count++;
 
     if (stride_count >= STRIDE_SAMPLES) {
-        // Đủ 5 samples mới → slide buffer và inference
+        // Dịch chuyển buffer: loại bỏ STRIDE_FLOATS phần tử đầu
         memmove(features,
                 features + STRIDE_FLOATS,
                 (WINDOW_FLOATS - STRIDE_FLOATS) * sizeof(float));
 
-        // Copy 5 samples mới vào cuối
-        // (đã ghi đúng vị trí ở trên, memmove giữ nguyên thứ tự)
         stride_count = 0;
         run_inference();
     }
 }
 
 // ============================================================
-//  INFERENCE
+//  INFERENCE FUNCTION
 // ============================================================
 void run_inference() {
     signal_t signal;
@@ -164,34 +190,154 @@ void run_inference() {
         return;
     }
 
-    // Tìm class cao nhất
-    float       max_val   = 0;
-    const char* max_label = "";
+    // Tìm class có confidence cao nhất
+    float       max_confidence = 0;
+    const char* predicted_label = "";
     for (int i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
-        if (result.classification[i].value > max_val) {
-            max_val   = result.classification[i].value;
-            max_label = result.classification[i].label;
+        if (result.classification[i].value > max_confidence) {
+            max_confidence = result.classification[i].value;
+            predicted_label = result.classification[i].label;
         }
     }
 
-    // In kết quả
+    // In kết quả ra Serial để theo dõi
     Serial.print("→ ");
     for (int i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
         Serial.printf("%s: %.0f%%  ",
             result.classification[i].label,
             result.classification[i].value * 100);
     }
-    Serial.printf("| %s\n", max_label);
+    Serial.printf("| %s\n", predicted_label);
 
-    // Kích hoạt buzzer nếu FALL
-    if (strcmp(max_label, "Fall") == 0 && max_val >= FALL_THRESHOLD) {
-        if (!buzzer_on) {
-            Serial.printf("⚠️  FALL DETECTED (%.0f%%)!\n", max_val * 100);
+    // ----- XỬ LÝ KHI PHÁT HIỆN TÉ NGÃ -----
+    if (strcmp(predicted_label, "Fall") == 0 && max_confidence >= FALL_THRESHOLD) {
+        // Bật còi nếu chưa bật VÀ chưa gửi cảnh báo (lần đầu tiên của sự kiện)
+        if (!buzzer_on && !alert_sent_for_current_fall) {
+            Serial.printf("⚠️  FALL DETECTED (%.0f%%)!\n", max_confidence * 100);
             digitalWrite(BUZZER_PIN, HIGH);
             digitalWrite(LED_PIN,    HIGH);
-            buzzer_on       = true;
+            buzzer_on = true;
             buzzer_start_ms = millis();
-            Serial.println("🔔 Buzzer ON");
+        }
+
+        // Gửi tín hiệu cảnh báo qua WiFi (chỉ một lần)
+        if (!alert_sent_for_current_fall) {
+            alert_sent_for_current_fall = true;
+            enableWiFi();
+            if (connectWiFi()) {
+                Serial.println("✅ WiFi connected, blinking LED 5 times...");
+                for (int i = 0; i < 5; i++) {
+                    digitalWrite(LED_PIN, HIGH);
+                    delay(500);
+                    digitalWrite(LED_PIN, LOW);
+                    delay(500);
+                }
+                disconnectWiFi();
+            } else {
+                Serial.println("⚠️ Không thể kết nối WiFi để gửi cảnh báo");
+            }
+            disableWiFi();
         }
     }
+    else {
+        // Khi không phải Fall, reset trạng thái gửi cảnh báo nếu confidence > 50%
+        if (max_confidence > 0.5) {
+            alert_sent_for_current_fall = false;
+        }
+    }
+}
+
+// ============================================================
+//  CALLBACK DATA PROVIDER FOR EDGE IMPULSE
+// ============================================================
+int get_signal_data(size_t offset, size_t length, float* out_ptr) {
+    memcpy(out_ptr, features + offset, length * sizeof(float));
+    return EIDSP_OK;
+}
+
+// ============================================================
+//  WI-FI MANAGEMENT FUNCTIONS
+// ============================================================
+void initWiFi() {
+    WiFi.mode(WIFI_OFF);
+    wifi_enabled = false;
+    Serial.println("WiFi initialized in OFF mode (power saving)");
+}
+
+void enableWiFi() {
+    if (!wifi_enabled) {
+        WiFi.mode(WIFI_STA);
+        wifi_enabled = true;
+        Serial.println("WiFi modem enabled");
+    }
+}
+
+void disableWiFi() {
+    if (wifi_enabled) {
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_OFF);
+        wifi_enabled = false;
+        Serial.println("WiFi modem disabled (power saving)");
+    }
+}
+
+bool connectWiFi() {
+    if (WiFi.status() == WL_CONNECTED) {
+        return true;
+    }
+
+    Serial.printf("Connecting to %s", WIFI_SSID);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+    unsigned long startAttempt = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < WIFI_TIMEOUT) {
+        delay(500);
+        Serial.print(".");
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\n✅ WiFi connected");
+        Serial.print("IP address: ");
+        Serial.println(WiFi.localIP());
+        return true;
+    } else {
+        Serial.println("\n❌ WiFi connection failed");
+        return false;
+    }
+}
+
+void disconnectWiFi() {
+    WiFi.disconnect();
+    Serial.println("WiFi disconnected");
+}
+
+// ============================================================
+//  (TÙY CHỌN) KIỂM TRA WIFI ĐỊNH KỲ - có thể bỏ qua nếu không dùng
+// ============================================================
+void performWiFiCheck() {
+    Serial.println("\n--- Bắt đầu kiểm tra WiFi định kỳ ---");
+    enableWiFi();
+    if (connectWiFi()) {
+        long rssi = WiFi.RSSI();
+        Serial.print("📶 RSSI: ");
+        Serial.print(rssi);
+        Serial.println(" dBm");
+
+        if (rssi > -50) {
+            Serial.println("Chất lượng: Tuyệt vời");
+        } else if (rssi > -60) {
+            Serial.println("Chất lượng: Tốt");
+        } else if (rssi > -70) {
+            Serial.println("Chất lượng: Trung bình");
+        } else {
+            Serial.println("Chất lượng: Kém (nguy cơ mất kết nối)");
+        }
+
+        Serial.printf("Kênh: %d, BSSID: %s\n", WiFi.channel(), WiFi.BSSIDstr().c_str());
+        disconnectWiFi();
+    } else {
+        Serial.println("⚠️ Không thể kết nối WiFi để kiểm tra.");
+    }
+    disableWiFi();
+    Serial.println("--- Kết thúc kiểm tra WiFi định kỳ ---\n");
 }
