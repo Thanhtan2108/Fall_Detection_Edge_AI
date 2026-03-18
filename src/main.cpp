@@ -8,10 +8,11 @@
 // ============================================================
 //  PIN DEFINITIONS
 // ============================================================
-#define BUZZER_PIN   18
-#define LED_PIN       2
-#define SDA_PIN      21
-#define SCL_PIN      22
+#define BUZZER_PIN          14
+#define LED_SEND_WIFI       2
+#define LED_MPU6050_ACTIVE  13
+#define SDA_PIN             21
+#define SCL_PIN             22
 
 // ============================================================
 //  SENSOR & AI CONFIGURATION
@@ -76,19 +77,22 @@ void setup() {
     setCpuFrequencyMhz(80);
     Serial.printf("CPU frequency set to %d MHz\n", getCpuFrequencyMhz());
 
-    pinMode(LED_PIN,    OUTPUT);
+    pinMode(LED_SEND_WIFI, OUTPUT);
+    pinMode(LED_MPU6050_ACTIVE, OUTPUT);
     pinMode(BUZZER_PIN, OUTPUT);
-    digitalWrite(LED_PIN,    LOW);
+    digitalWrite(LED_SEND_WIFI, LOW);
+    digitalWrite(LED_MPU6050_ACTIVE, LOW);
     digitalWrite(BUZZER_PIN, LOW);
 
     // Khởi tạo I2C và MPU6050
     Wire.begin(SDA_PIN, SCL_PIN);
     if (!mpu.begin()) {
-        Serial.println("❌ MPU6050 not found!");
         while (true) {
-            digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+            digitalWrite(LED_MPU6050_ACTIVE, LOW);
             delay(1000);
         }
+    } else {
+        digitalWrite(LED_MPU6050_ACTIVE, HIGH);
     }
 
     mpu.setAccelerometerRange(MPU6050_RANGE_16_G);
@@ -115,7 +119,6 @@ void loop() {
     // Xử lý tắt buzzer sau thời gian quy định
     if (buzzer_on && (now - buzzer_start_ms >= BUZZER_DURATION_MS)) {
         digitalWrite(BUZZER_PIN, LOW);
-        digitalWrite(LED_PIN,    LOW);
         buzzer_on = false;
         Serial.println("🔕 Buzzer turned off");
     }
@@ -215,7 +218,6 @@ void run_inference() {
         if (!buzzer_on && !alert_sent_for_current_fall) {
             Serial.printf("⚠️  FALL DETECTED (%.0f%%)!\n", max_confidence * 100);
             digitalWrite(BUZZER_PIN, HIGH);
-            digitalWrite(LED_PIN,    HIGH);
             buzzer_on = true;
             buzzer_start_ms = millis();
         }
@@ -227,9 +229,9 @@ void run_inference() {
             if (connectWiFi()) {
                 Serial.println("✅ WiFi connected, blinking LED 5 times...");
                 for (int i = 0; i < 5; i++) {
-                    digitalWrite(LED_PIN, HIGH);
+                    digitalWrite(LED_SEND_WIFI, HIGH);
                     delay(500);
-                    digitalWrite(LED_PIN, LOW);
+                    digitalWrite(LED_SEND_WIFI, LOW);
                     delay(500);
                 }
                 disconnectWiFi();
