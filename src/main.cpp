@@ -64,7 +64,6 @@ bool connectWiFi();
 void disconnectWiFi();
 void enableWiFi();
 void disableWiFi();
-void performWiFiCheck();           // Hàm kiểm tra WiFi định kỳ (tùy chọn)
 
 // ============================================================
 //  SETUP
@@ -311,35 +310,4 @@ bool connectWiFi() {
 void disconnectWiFi() {
     WiFi.disconnect();
     Serial.println("WiFi disconnected");
-}
-
-// ============================================================
-//  (TÙY CHỌN) KIỂM TRA WIFI ĐỊNH KỲ - có thể bỏ qua nếu không dùng
-// ============================================================
-void performWiFiCheck() {
-    Serial.println("\n--- Bắt đầu kiểm tra WiFi định kỳ ---");
-    enableWiFi();
-    if (connectWiFi()) {
-        long rssi = WiFi.RSSI();
-        Serial.print("📶 RSSI: ");
-        Serial.print(rssi);
-        Serial.println(" dBm");
-
-        if (rssi > -50) {
-            Serial.println("Chất lượng: Tuyệt vời");
-        } else if (rssi > -60) {
-            Serial.println("Chất lượng: Tốt");
-        } else if (rssi > -70) {
-            Serial.println("Chất lượng: Trung bình");
-        } else {
-            Serial.println("Chất lượng: Kém (nguy cơ mất kết nối)");
-        }
-
-        Serial.printf("Kênh: %d, BSSID: %s\n", WiFi.channel(), WiFi.BSSIDstr().c_str());
-        disconnectWiFi();
-    } else {
-        Serial.println("⚠️ Không thể kết nối WiFi để kiểm tra.");
-    }
-    disableWiFi();
-    Serial.println("--- Kết thúc kiểm tra WiFi định kỳ ---\n");
 }
