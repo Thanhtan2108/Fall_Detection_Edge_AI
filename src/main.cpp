@@ -120,10 +120,18 @@ void loop() {
 void startRecording() {
   sampleCount   = 0;
   isRecording   = true;
+  
+  // Báo hiệu chuẩn bị: nhấp nháy LED nhanh 5 lần
+  for (int i = 0; i < 5; i++) {
+    digitalWrite(LED_PIN, HIGH);
+    delay(200);
+    digitalWrite(LED_PIN, LOW);
+    delay(200);
+  }
+  
   recordStart   = millis();
   lastSample    = millis();
-
-  digitalWrite(LED_PIN, HIGH);
+  digitalWrite(LED_PIN, HIGH);  // Bật LED trong suốt quá trình thu
   Serial.printf("🔴 [%02d] Đang thu thập...\n", fileIndex);
 }
 
