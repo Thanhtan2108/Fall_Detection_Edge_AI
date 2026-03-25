@@ -12,12 +12,10 @@ const unsigned long DEBOUNCE_TIME = 50;
 
 // ================= BUZZER =================
 bool buzzerState = false;
-unsigned long buzzerStartTime = 0;
-unsigned long buzzerDuration = 0;
 
 // ================= FUNCTION =================
 void updateButton();
-void startBuzzer(unsigned long duration);
+void startBuzzer();
 void updateBuzzer();
 
 void setup() {
@@ -50,9 +48,10 @@ void updateButton() {
 
             if (stableButtonState == LOW) {
                 Serial.println(">>> PRESS BUTTON");
-                startBuzzer(1000); // kêu 1 giây
+                buzzerState = true;
             } else {
                 Serial.println(">>> RELEASE BUTTON");
+                buzzerState = false;
             }
         }
     }
@@ -61,21 +60,10 @@ void updateButton() {
 }
 
 // ================= BUZZER HANDLE =================
-void startBuzzer(unsigned long duration) {
-    buzzerState = true;
-    buzzerStartTime = millis();
-    buzzerDuration = duration;
-
-    digitalWrite(BUZZER_PIN, HIGH);
-}
-
 void updateBuzzer() {
-    unsigned long buzzerCurrentTime = millis();
-    
     if (buzzerState) {
-        if (buzzerCurrentTime - buzzerStartTime >= buzzerDuration) {
-            buzzerState = false;
-            digitalWrite(BUZZER_PIN, LOW);
-        }
+        digitalWrite(BUZZER_PIN, HIGH);
+    } else {
+        digitalWrite(BUZZER_PIN, LOW);
     }
 }
