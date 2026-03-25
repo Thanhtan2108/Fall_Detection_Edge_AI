@@ -20,16 +20,16 @@
 #define SAMPLE_RATE_HZ      25
 #define SAMPLE_INTERVAL_MS  (1000 / SAMPLE_RATE_HZ)  // 40ms
 #define BUZZER_DURATION_MS  3000
-#define FALL_THRESHOLD      0.70f
+#define FALL_THRESHOLD      0.99f
 #define STRIDE_SAMPLES      5
 #define STRIDE_FLOATS       (STRIDE_SAMPLES * 3)      // 15
-#define WINDOW_FLOATS       EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE  // 150
+#define WINDOW_FLOATS       EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE
 
 // ============================================================
 //  WI-FI CONFIGURATION
 // ============================================================
-const char* WIFI_SSID = "Thanhtan";
-const char* WIFI_PASS = "12345678";
+const char* WIFI_SSID = "Thanh Tan";
+const char* WIFI_PASS = "daquenmatroi";
 const int   WIFI_TIMEOUT = 10000;  // 10 giây timeout kết nối
 
 // ============================================================
@@ -72,8 +72,6 @@ void setup() {
     Serial.begin(115200);
     delay(500);
 
-    // Tiết kiệm năng lượng: giảm tần số CPU
-    setCpuFrequencyMhz(80);
     Serial.printf("CPU frequency set to %d MHz\n", getCpuFrequencyMhz());
 
     pinMode(LED_SEND_WIFI, OUTPUT);
