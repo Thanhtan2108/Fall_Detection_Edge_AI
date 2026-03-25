@@ -15,7 +15,6 @@ bool buzzerState = false;
 
 // ================= FUNCTION =================
 void updateButton();
-void startBuzzer();
 void updateBuzzer();
 
 void setup() {
