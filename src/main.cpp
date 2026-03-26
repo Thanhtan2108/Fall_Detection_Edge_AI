@@ -21,6 +21,7 @@
 #define SAMPLE_INTERVAL_MS  (1000 / SAMPLE_RATE_HZ)  // 40ms
 #define BUZZER_DURATION_MS  3000
 #define FALL_THRESHOLD      0.99f
+#define NORMAL_THRESHOLD    0.60f
 #define STRIDE_SAMPLES      5
 #define STRIDE_FLOATS       (STRIDE_SAMPLES * 3)      // 15
 #define WINDOW_FLOATS       EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE
@@ -99,12 +100,11 @@ void setup() {
     // WiFi ở chế độ tắt ngay từ đầu
     initWiFi();
 
-    Serial.println("✅ Fall Detection System Ready");
-    Serial.printf("   Buffer size : %d floats (%d samples)\n",
-                  WINDOW_FLOATS, WINDOW_FLOATS / 3);
-    Serial.printf("   Sample rate : %d Hz\n", SAMPLE_RATE_HZ);
-    Serial.printf("   Fall threshold: %.0f%%\n", FALL_THRESHOLD * 100);
-    Serial.println("   Filling initial buffer (2 seconds)...");
+    Serial.println("Fall Detection System Ready");
+    Serial.printf("Buffer size : %d floats (%d samples)\n", WINDOW_FLOATS, WINDOW_FLOATS / 3);
+    Serial.printf("Sample rate : %d Hz\n", SAMPLE_RATE_HZ);
+    Serial.printf("Fall threshold: %.0f%%\n", FALL_THRESHOLD * 100);
+    Serial.println("Filling initial buffer (2 seconds)...");
 }
 
 // ============================================================
@@ -117,7 +117,7 @@ void loop() {
     if (buzzer_on && (now - buzzer_start_ms >= BUZZER_DURATION_MS)) {
         digitalWrite(BUZZER_PIN, LOW);
         buzzer_on = false;
-        Serial.println("🔕 Buzzer turned off");
+        Serial.println("Buzzer turned off");
     }
 
     // (Tùy chọn) Kiểm tra WiFi định kỳ - có thể bỏ comment nếu muốn
@@ -150,7 +150,7 @@ void loop() {
         if (samples_collected >= WINDOW_FLOATS / 3) {
             buffer_full = true;
             stride_count = 0;
-            Serial.println("   Buffer full — starting inference!");
+            Serial.println("Buffer full — starting inference!");
             run_inference();
         }
         return;
@@ -165,9 +165,7 @@ void loop() {
 
     if (stride_count >= STRIDE_SAMPLES) {
         // Dịch chuyển buffer: loại bỏ STRIDE_FLOATS phần tử đầu
-        memmove(features,
-                features + STRIDE_FLOATS,
-                (WINDOW_FLOATS - STRIDE_FLOATS) * sizeof(float));
+        memmove(features, features + STRIDE_FLOATS, (WINDOW_FLOATS - STRIDE_FLOATS) * sizeof(float));
 
         stride_count = 0;
         run_inference();
@@ -186,7 +184,7 @@ void run_inference() {
     EI_IMPULSE_ERROR err = run_classifier(&signal, &result, false);
 
     if (err != EI_IMPULSE_OK) {
-        Serial.printf("❌ Classifier error: %d\n", err);
+        Serial.printf("Classifier error: %d\n", err);
         return;
     }
 
@@ -195,7 +193,7 @@ void run_inference() {
     const char* predicted_label = "";
     for (int i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
         if (result.classification[i].value > max_confidence) {
-            max_confidence = result.classification[i].value;
+            max_confidence = result.classification[i].value; // kết quả xác xuất chính xác của mỗi lần dự đoán ~ softmax
             predicted_label = result.classification[i].label;
         }
     }
@@ -203,9 +201,7 @@ void run_inference() {
     // In kết quả ra Serial để theo dõi
     Serial.print("→ ");
     for (int i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
-        Serial.printf("%s: %.0f%%  ",
-            result.classification[i].label,
-            result.classification[i].value * 100);
+        Serial.printf("%s: %.0f%%  ", result.classification[i].label, result.classification[i].value * 100);
     }
     Serial.printf("| %s\n", predicted_label);
 
@@ -213,7 +209,7 @@ void run_inference() {
     if (strcmp(predicted_label, "Fall") == 0 && max_confidence >= FALL_THRESHOLD) {
         // Bật còi nếu chưa bật VÀ chưa gửi cảnh báo (lần đầu tiên của sự kiện)
         if (!buzzer_on && !alert_sent_for_current_fall) {
-            Serial.printf("⚠️  FALL DETECTED (%.0f%%)!\n", max_confidence * 100);
+            Serial.printf("FALL DETECTED (%.0f%%)!\n", max_confidence * 100);
             digitalWrite(BUZZER_PIN, HIGH);
             buzzer_on = true;
             buzzer_start_ms = millis();
@@ -224,7 +220,7 @@ void run_inference() {
             alert_sent_for_current_fall = true;
             enableWiFi();
             if (connectWiFi()) {
-                Serial.println("✅ WiFi connected, blinking LED 5 times...");
+                Serial.println("WiFi connected, blinking LED 5 times...");
                 for (int i = 0; i < 5; i++) {
                     digitalWrite(LED_SEND_WIFI, HIGH);
                     delay(500);
@@ -233,14 +229,14 @@ void run_inference() {
                 }
                 disconnectWiFi();
             } else {
-                Serial.println("⚠️ Không thể kết nối WiFi để gửi cảnh báo");
+                Serial.println("Không thể kết nối WiFi để gửi cảnh báo");
             }
             disableWiFi();
         }
     }
     else {
         // Khi không phải Fall, reset trạng thái gửi cảnh báo nếu confidence > 50%
-        if (max_confidence > 0.5) {
+        if (max_confidence >= NORMAL_THRESHOLD) {
             alert_sent_for_current_fall = false;
         }
     }
@@ -295,12 +291,12 @@ bool connectWiFi() {
     }
 
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("\n✅ WiFi connected");
+        Serial.println("\nWiFi connected");
         Serial.print("IP address: ");
         Serial.println(WiFi.localIP());
         return true;
     } else {
-        Serial.println("\n❌ WiFi connection failed");
+        Serial.println("\nWiFi connection failed");
         return false;
     }
 }
