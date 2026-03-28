@@ -24,7 +24,7 @@
 #define NORMAL_THRESHOLD    0.60f
 #define STRIDE_SAMPLES      5
 #define STRIDE_FLOATS       (STRIDE_SAMPLES * 3)      // 15
-#define WINDOW_FLOATS       EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE
+#define WINDOW_FLOATS       EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE // 62 x 3
 
 // ============================================================
 //  WI-FI CONFIGURATION
@@ -47,13 +47,9 @@ unsigned long last_sample_ms    = 0;
 unsigned long buzzer_start_ms   = 0;
 bool          buzzer_on         = false;
 
-// Biến trạng thái gửi cảnh báo (dùng để tránh gửi nhiều lần cho một sự kiện)
+// Biến trạng thái gửi cảnh báo
 bool alert_sent_for_current_fall = false;
 bool wifi_enabled = false;
-
-// Biến cho kiểm tra WiFi định kỳ (có thể bỏ nếu không cần)
-unsigned long lastWiFiCheck = 0;
-const unsigned long WIFI_CHECK_INTERVAL = 60000; // 60 giây
 
 // ============================================================
 //  FUNCTION PROTOTYPES
@@ -113,18 +109,12 @@ void setup() {
 void loop() {
     unsigned long now = millis();
 
-    // Xử lý tắt buzzer sau thời gian quy định
+    // Xử lý tắt buzzer
     if (buzzer_on && (now - buzzer_start_ms >= BUZZER_DURATION_MS)) {
         digitalWrite(BUZZER_PIN, LOW);
         buzzer_on = false;
         Serial.println("Buzzer turned off");
     }
-
-    // (Tùy chọn) Kiểm tra WiFi định kỳ - có thể bỏ comment nếu muốn
-    // if (!buzzer_on && (now - lastWiFiCheck >= WIFI_CHECK_INTERVAL)) {
-    //     lastWiFiCheck = now;
-    //     performWiFiCheck();
-    // }
 
     // Đảm bảo tốc độ lấy mẫu 25Hz
     if (now - last_sample_ms < SAMPLE_INTERVAL_MS) return;
