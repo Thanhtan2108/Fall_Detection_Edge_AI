@@ -18,7 +18,7 @@
 //  SENSOR & AI CONFIGURATION
 // ============================================================
 #define SAMPLE_RATE_HZ      25
-#define SAMPLE_INTERVAL_MS  (1000 / SAMPLE_RATE_HZ)  // 40ms
+#define SAMPLE_INTERVAL_MS  (1000 / SAMPLE_RATE_HZ)  // 40msN
 #define BUZZER_DURATION_MS  3000
 #define FALL_THRESHOLD      0.99f
 #define NORMAL_THRESHOLD    0.60f
@@ -83,7 +83,6 @@ void setup() {
     if (!mpu.begin()) {
         while (true) {
             digitalWrite(LED_MPU6050_ACTIVE, LOW);
-            delay(1000);
         }
     } else {
         digitalWrite(LED_MPU6050_ACTIVE, HIGH);
