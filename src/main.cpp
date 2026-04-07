@@ -13,12 +13,13 @@
 #define LED_MPU6050_ACTIVE  13
 #define SDA_PIN             21
 #define SCL_PIN             22
+#define BUTTON_PIN          18          // [NEW] Chân nút nhấn (INPUT_PULLUP)
 
 // ============================================================
 //  SENSOR & AI CONFIGURATION
 // ============================================================
 #define SAMPLE_RATE_HZ      25
-#define SAMPLE_INTERVAL_MS  (1000 / SAMPLE_RATE_HZ)  // 40msN
+#define SAMPLE_INTERVAL_MS  (1000 / SAMPLE_RATE_HZ)  // 40ms
 #define BUZZER_DURATION_MS  3000
 #define FALL_THRESHOLD      0.99f
 #define NORMAL_THRESHOLD    0.60f
@@ -51,6 +52,12 @@ bool          buzzer_on         = false;
 bool alert_sent_for_current_fall = false;
 bool wifi_enabled = false;
 
+// ================= NÚT NHẤN (DEBOUNCE) ================= [NEW]
+bool lastButtonState = HIGH;
+bool stableButtonState = HIGH;
+unsigned long lastDebounceTime = 0;
+const unsigned long DEBOUNCE_TIME = 50;
+
 // ============================================================
 //  FUNCTION PROTOTYPES
 // ============================================================
@@ -61,6 +68,7 @@ bool connectWiFi();
 void disconnectWiFi();
 void enableWiFi();
 void disableWiFi();
+void handleButton();   // [NEW] prototype
 
 // ============================================================
 //  SETUP
@@ -74,6 +82,7 @@ void setup() {
     pinMode(LED_SEND_WIFI, OUTPUT);
     pinMode(LED_MPU6050_ACTIVE, OUTPUT);
     pinMode(BUZZER_PIN, OUTPUT);
+    pinMode(BUTTON_PIN, INPUT_PULLUP);   // [NEW] Khởi tạo nút nhấn
     digitalWrite(LED_SEND_WIFI, LOW);
     digitalWrite(LED_MPU6050_ACTIVE, LOW);
     digitalWrite(BUZZER_PIN, LOW);
@@ -108,11 +117,13 @@ void setup() {
 void loop() {
     unsigned long now = millis();
 
-    // Xử lý tắt buzzer
+    handleButton();   // [NEW] Gọi xử lý nút nhấn mỗi vòng lặp
+
+    // Xử lý tắt buzzer theo thời gian (tự động sau BUZZER_DURATION_MS)
     if (buzzer_on && (now - buzzer_start_ms >= BUZZER_DURATION_MS)) {
         digitalWrite(BUZZER_PIN, LOW);
         buzzer_on = false;
-        Serial.println("Buzzer turned off");
+        Serial.println("Buzzer turned off (timeout)");
     }
 
     // Đảm bảo tốc độ lấy mẫu 25Hz
@@ -182,7 +193,7 @@ void run_inference() {
     const char* predicted_label = "";
     for (int i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
         if (result.classification[i].value > max_confidence) {
-            max_confidence = result.classification[i].value; // kết quả xác xuất chính xác của mỗi lần dự đoán ~ softmax
+            max_confidence = result.classification[i].value;
             predicted_label = result.classification[i].label;
         }
     }
@@ -293,4 +304,37 @@ bool connectWiFi() {
 void disconnectWiFi() {
     WiFi.disconnect();
     Serial.println("WiFi disconnected");
+}
+
+// ============================================================
+//  BUTTON HANDLER (TOGGLE BUZZER)
+// ============================================================
+void handleButton() {
+    unsigned long now = millis();
+    bool currentState = digitalRead(BUTTON_PIN);
+
+    // Debounce
+    if (currentState != lastButtonState) {
+        lastDebounceTime = now;
+    }
+    lastButtonState = currentState;
+
+    if (now - lastDebounceTime > DEBOUNCE_TIME) {
+        if (currentState != stableButtonState) {
+            stableButtonState = currentState;
+            if (stableButtonState == LOW) {  // nhấn nút (LOW vì INPUT_PULLUP)
+                Serial.println(">>> Button pressed - Toggle buzzer");
+                // Đảo trạng thái buzzer
+                buzzer_on = !buzzer_on;
+                if (buzzer_on) {
+                    digitalWrite(BUZZER_PIN, HIGH);
+                    buzzer_start_ms = millis();   // để sau 3s tự tắt nếu không có tác động khác
+                    Serial.println("Buzzer turned ON by button");
+                } else {
+                    digitalWrite(BUZZER_PIN, LOW);
+                    Serial.println("Buzzer turned OFF by button");
+                }
+            }
+        }
+    }
 }
