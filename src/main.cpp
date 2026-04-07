@@ -13,7 +13,7 @@
 #define LED_MPU6050_ACTIVE  13
 #define SDA_PIN             21
 #define SCL_PIN             22
-#define BUTTON_PIN          18          // [NEW] Chân nút nhấn (INPUT_PULLUP)
+#define BUTTON_PIN          18          // nút nhấn (INPUT_PULLUP)
 
 // ============================================================
 //  SENSOR & AI CONFIGURATION
@@ -32,7 +32,7 @@
 // ============================================================
 const char* WIFI_SSID = "Thanhtan";
 const char* WIFI_PASS = "12345678";
-const int   WIFI_TIMEOUT = 10000;  // 10 giây timeout kết nối
+const int   WIFI_TIMEOUT = 10000;  // 10 giây timeout kết nối (non-blocking)
 
 // ============================================================
 //  GLOBAL VARIABLES
@@ -48,15 +48,25 @@ unsigned long last_sample_ms    = 0;
 unsigned long buzzer_start_ms   = 0;
 bool          buzzer_on         = false;
 
-// Biến trạng thái gửi cảnh báo
 bool alert_sent_for_current_fall = false;
 bool wifi_enabled = false;
 
-// ================= NÚT NHẤN (DEBOUNCE) ================= [NEW]
+// ================= NÚT NHẤN (DEBOUNCE) =================
 bool lastButtonState = HIGH;
 bool stableButtonState = HIGH;
 unsigned long lastDebounceTime = 0;
 const unsigned long DEBOUNCE_TIME = 50;
+
+// ================= WI-FI STATE MACHINE (non-blocking) =================
+enum WiFiState {
+    WIFI_IDLE,
+    WIFI_CONNECTING,
+    WIFI_BLINKING,
+    WIFI_DONE
+};
+WiFiState wifiState = WIFI_IDLE;
+unsigned long wifiStateStartTime = 0;
+int blinkCounter = 0;          // 0..9 (5 lần sáng + 5 lần tắt)
 
 // ============================================================
 //  FUNCTION PROTOTYPES
@@ -64,11 +74,11 @@ const unsigned long DEBOUNCE_TIME = 50;
 int  get_signal_data(size_t offset, size_t length, float* out_ptr);
 void run_inference();
 void initWiFi();
-bool connectWiFi();
-void disconnectWiFi();
 void enableWiFi();
 void disableWiFi();
-void handleButton();   // [NEW] prototype
+void handleButton();
+void wifiTask();               // state machine cho WiFi
+void disconnectWiFi();
 
 // ============================================================
 //  SETUP
@@ -82,7 +92,7 @@ void setup() {
     pinMode(LED_SEND_WIFI, OUTPUT);
     pinMode(LED_MPU6050_ACTIVE, OUTPUT);
     pinMode(BUZZER_PIN, OUTPUT);
-    pinMode(BUTTON_PIN, INPUT_PULLUP);   // [NEW] Khởi tạo nút nhấn
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
     digitalWrite(LED_SEND_WIFI, LOW);
     digitalWrite(LED_MPU6050_ACTIVE, LOW);
     digitalWrite(BUZZER_PIN, LOW);
@@ -101,7 +111,6 @@ void setup() {
     mpu.setGyroRange(MPU6050_RANGE_500_DEG);
     mpu.setFilterBandwidth(MPU6050_BAND_10_HZ);
 
-    // WiFi ở chế độ tắt ngay từ đầu
     initWiFi();
 
     Serial.println("Fall Detection System Ready");
@@ -117,9 +126,10 @@ void setup() {
 void loop() {
     unsigned long now = millis();
 
-    handleButton();   // [NEW] Gọi xử lý nút nhấn mỗi vòng lặp
+    handleButton();               // luôn xử lý nút nhấn
+    wifiTask();                   // xử lý WiFi không blocking
 
-    // Xử lý tắt buzzer theo thời gian (tự động sau BUZZER_DURATION_MS)
+    // Tắt buzzer nếu hết thời gian
     if (buzzer_on && (now - buzzer_start_ms >= BUZZER_DURATION_MS)) {
         digitalWrite(BUZZER_PIN, LOW);
         buzzer_on = false;
@@ -130,16 +140,14 @@ void loop() {
     if (now - last_sample_ms < SAMPLE_INTERVAL_MS) return;
     last_sample_ms = now;
 
-    // Đọc dữ liệu từ MPU6050
+    // Đọc dữ liệu MPU6050
     sensors_event_t a, g, temp;
     mpu.getEvent(&a, &g, &temp);
-
-    // Chuyển đổi sang đơn vị G (trọng lực)
     float x = a.acceleration.x / 9.80665f;
     float y = a.acceleration.y / 9.80665f;
     float z = a.acceleration.z / 9.80665f;
 
-    // ----- GIAI ĐOẠN 1: TÍCH LŨY BUFFER LẦN ĐẦU -----
+    // Giai đoạn 1: tích lũy buffer lần đầu
     if (!buffer_full) {
         int idx = samples_collected * 3;
         features[idx]     = x;
@@ -156,7 +164,7 @@ void loop() {
         return;
     }
 
-    // ----- GIAI ĐOẠN 2: SLIDING WINDOW -----
+    // Giai đoạn 2: sliding window
     int write_idx = WINDOW_FLOATS - STRIDE_FLOATS + stride_count * 3;
     features[write_idx]     = x;
     features[write_idx + 1] = y;
@@ -164,9 +172,7 @@ void loop() {
     stride_count++;
 
     if (stride_count >= STRIDE_SAMPLES) {
-        // Dịch chuyển buffer: loại bỏ STRIDE_FLOATS phần tử đầu
         memmove(features, features + STRIDE_FLOATS, (WINDOW_FLOATS - STRIDE_FLOATS) * sizeof(float));
-
         stride_count = 0;
         run_inference();
     }
@@ -188,7 +194,6 @@ void run_inference() {
         return;
     }
 
-    // Tìm class có confidence cao nhất
     float       max_confidence = 0;
     const char* predicted_label = "";
     for (int i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
@@ -198,16 +203,15 @@ void run_inference() {
         }
     }
 
-    // In kết quả ra Serial để theo dõi
     Serial.print("→ ");
     for (int i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
         Serial.printf("%s: %.0f%%  ", result.classification[i].label, result.classification[i].value * 100);
     }
     Serial.printf("| %s\n", predicted_label);
 
-    // ----- XỬ LÝ KHI PHÁT HIỆN TÉ NGÃ -----
+    // Xử lý khi phát hiện té ngã
     if (strcmp(predicted_label, "Fall") == 0 && max_confidence >= FALL_THRESHOLD) {
-        // Bật còi nếu chưa bật VÀ chưa gửi cảnh báo (lần đầu tiên của sự kiện)
+        // Bật còi lần đầu của sự kiện té ngã
         if (!buzzer_on && !alert_sent_for_current_fall) {
             Serial.printf("FALL DETECTED (%.0f%%)!\n", max_confidence * 100);
             digitalWrite(BUZZER_PIN, HIGH);
@@ -215,27 +219,21 @@ void run_inference() {
             buzzer_start_ms = millis();
         }
 
-        // Gửi tín hiệu cảnh báo qua WiFi (chỉ một lần)
+        // Gửi cảnh báo WiFi chỉ một lần (kích hoạt state machine)
         if (!alert_sent_for_current_fall) {
             alert_sent_for_current_fall = true;
-            enableWiFi();
-            if (connectWiFi()) {
-                Serial.println("WiFi connected, blinking LED 5 times...");
-                for (int i = 0; i < 5; i++) {
-                    digitalWrite(LED_SEND_WIFI, HIGH);
-                    delay(500);
-                    digitalWrite(LED_SEND_WIFI, LOW);
-                    delay(500);
-                }
-                disconnectWiFi();
-            } else {
-                Serial.println("Không thể kết nối WiFi để gửi cảnh báo");
+            // Chỉ khởi tạo nếu WiFi chưa hoạt động
+            if (wifiState == WIFI_IDLE) {
+                enableWiFi();
+                WiFi.begin(WIFI_SSID, WIFI_PASS);
+                wifiState = WIFI_CONNECTING;
+                wifiStateStartTime = millis();
+                Serial.println("WiFi connecting (non-blocking)...");
             }
-            disableWiFi();
         }
     }
     else {
-        // Khi không phải Fall, reset trạng thái gửi cảnh báo nếu confidence > 50%
+        // Reset trạng thái cảnh báo khi bình thường (confidence > 60%)
         if (max_confidence >= NORMAL_THRESHOLD) {
             alert_sent_for_current_fall = false;
         }
@@ -251,12 +249,12 @@ int get_signal_data(size_t offset, size_t length, float* out_ptr) {
 }
 
 // ============================================================
-//  WI-FI MANAGEMENT FUNCTIONS
+//  WI-FI MANAGEMENT (non-blocking state machine)
 // ============================================================
 void initWiFi() {
     WiFi.mode(WIFI_OFF);
     wifi_enabled = false;
-    Serial.println("WiFi initialized in OFF mode (power saving)");
+    Serial.println("WiFi initialized in OFF mode");
 }
 
 void enableWiFi() {
@@ -272,38 +270,64 @@ void disableWiFi() {
         WiFi.disconnect(true);
         WiFi.mode(WIFI_OFF);
         wifi_enabled = false;
-        Serial.println("WiFi modem disabled (power saving)");
+        Serial.println("WiFi modem disabled");
     }
 }
 
-bool connectWiFi() {
-    if (WiFi.status() == WL_CONNECTED) {
-        return true;
-    }
+void wifiTask() {
+    unsigned long now = millis();
 
-    Serial.printf("Connecting to %s", WIFI_SSID);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    switch (wifiState) {
+        case WIFI_IDLE:
+            // không làm gì
+            break;
 
-    unsigned long startAttempt = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < WIFI_TIMEOUT) {
-        delay(500);
-        Serial.print(".");
-    }
+        case WIFI_CONNECTING:
+            if (WiFi.status() == WL_CONNECTED) {
+                Serial.println("WiFi connected");
+                Serial.print("IP address: ");
+                Serial.println(WiFi.localIP());
+                // Chuyển sang trạng thái nháy LED (5 lần)
+                wifiState = WIFI_BLINKING;
+                wifiStateStartTime = now;
+                blinkCounter = 0;
+                digitalWrite(LED_SEND_WIFI, HIGH);  // bắt đầu sáng
+            } else if (now - wifiStateStartTime > WIFI_TIMEOUT) {
+                Serial.println("WiFi connection failed");
+                wifiState = WIFI_DONE;  // kết thúc, sẽ tắt modem
+            }
+            break;
 
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("\nWiFi connected");
-        Serial.print("IP address: ");
-        Serial.println(WiFi.localIP());
-        return true;
-    } else {
-        Serial.println("\nWiFi connection failed");
-        return false;
+        case WIFI_BLINKING:
+            // Nháy 5 lần: mỗi lần sáng 100ms, tắt 100ms -> tổng 1 chu kỳ 200ms
+            // 5 lần = 10 nửa chu kỳ (blinkCounter từ 0 đến 9)
+            if (blinkCounter < 10) {
+                if (now - wifiStateStartTime >= 100) {
+                    // Đảo trạng thái LED
+                    digitalWrite(LED_SEND_WIFI, !digitalRead(LED_SEND_WIFI));
+                    wifiStateStartTime = now;
+                    blinkCounter++;
+                }
+            } else {
+                // Kết thúc nháy, tắt LED
+                digitalWrite(LED_SEND_WIFI, LOW);
+                wifiState = WIFI_DONE;
+            }
+            break;
+
+        case WIFI_DONE:
+            disconnectWiFi();  // gọi disconnect và tắt modem
+            disableWiFi();
+            wifiState = WIFI_IDLE;
+            break;
     }
 }
 
 void disconnectWiFi() {
-    WiFi.disconnect();
-    Serial.println("WiFi disconnected");
+    if (WiFi.status() == WL_CONNECTED) {
+        WiFi.disconnect();
+        Serial.println("WiFi disconnected");
+    }
 }
 
 // ============================================================
@@ -313,7 +337,6 @@ void handleButton() {
     unsigned long now = millis();
     bool currentState = digitalRead(BUTTON_PIN);
 
-    // Debounce
     if (currentState != lastButtonState) {
         lastDebounceTime = now;
     }
@@ -322,13 +345,12 @@ void handleButton() {
     if (now - lastDebounceTime > DEBOUNCE_TIME) {
         if (currentState != stableButtonState) {
             stableButtonState = currentState;
-            if (stableButtonState == LOW) {  // nhấn nút (LOW vì INPUT_PULLUP)
+            if (stableButtonState == LOW) {  // nhấn nút
                 Serial.println(">>> Button pressed - Toggle buzzer");
-                // Đảo trạng thái buzzer
                 buzzer_on = !buzzer_on;
                 if (buzzer_on) {
                     digitalWrite(BUZZER_PIN, HIGH);
-                    buzzer_start_ms = millis();   // để sau 3s tự tắt nếu không có tác động khác
+                    buzzer_start_ms = millis();
                     Serial.println("Buzzer turned ON by button");
                 } else {
                     digitalWrite(BUZZER_PIN, LOW);
