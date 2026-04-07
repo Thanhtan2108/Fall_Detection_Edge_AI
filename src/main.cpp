@@ -29,8 +29,8 @@
 // ============================================================
 //  WI-FI CONFIGURATION
 // ============================================================
-const char* WIFI_SSID = "Thanh Tan";
-const char* WIFI_PASS = "daquenmatroi";
+const char* WIFI_SSID = "Thanhtan";
+const char* WIFI_PASS = "12345678";
 const int   WIFI_TIMEOUT = 10000;  // 10 giây timeout kết nối
 
 // ============================================================
