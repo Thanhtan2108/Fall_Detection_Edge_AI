@@ -192,3 +192,300 @@ ATI
 | | Nguồn không đủ dòng | Dùng nguồn 5V/2A chất lượng cao, không dùng cổng USB máy tính. |
 | Serial Monitor hiển thị ký tự lạ | Baudrate không khớp | Kiểm tra lại simSerial.begin() và Serial Monitor đều là 115200. |
 | Module phản hồi ERROR | Lệnh AT sai cú pháp hoặc module chưa hỗ trợ | Đây là dấu hiệu kết nối đã ổn, chỉ cần kiểm tra lại lệnh. |
+
+## Module SIM gửi tin nhắn SMS đến số điện thoại được chỉ định
+
+Hình dung module A7680C không chỉ là một con chip truyền nhận tín hiệu vô tuyến đơn thuần. Nó là một chiếc điện thoại di động hoàn chỉnh, nhưng bị cắt bỏ màn hình, bàn phím và pin.
+
+### Bên trong module bao gồm
+
+| Thành phần                        | Chức năng                                                                                                               | Tương đương trên điện thoại                   |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| Vi xử lý (CPU)                    | Chạy hệ điều hành riêng (thường là ThreadX hoặc Linux RTOS), quản lý toàn bộ hoạt động.                                 | CPU chính của điện thoại.                     |
+| Baseband Processor                | Xử lý tín hiệu vô tuyến, mã hóa/giải mã tín hiệu 4G, giao tiếp với trạm phát sóng (BTS).                                | Chip baseband (Qualcomm, MediaTek).           |
+| SIM Controller                    | Giao tiếp với thẻ SIM, xác thực với nhà mạng.                                                                           | Khe SIM.                                      |
+| Bộ nhớ Flash/RAM                  | Lưu trữ firmware và dữ liệu tạm.                                                                                        | Bộ nhớ trong của điện thoại.                  |
+| Giao thức di động (GSM/LTE Stack) | Phần mềm tích hợp sẵn toàn bộ chồng giao thức từ tầng vật lý đến tầng ứng dụng (L1, L2, L3, NAS, SMS, Call Control...). | Hệ điều hành Android/iOS (phần quản lý mạng). |
+
+### Vai Trò Của ESP32 và UART
+
+Khi gửi lệnh `AT+CMGS="+84xxxxxxxxx"` qua UART, điều gì xảy ra?
+
+- ESP32 chỉ đơn giản gửi một chuỗi ký tự (text) qua chân TX2. Nó không hề biết SMS là gì, sóng 4G là gì.
+
+- Module A7680C nhận chuỗi ký tự đó qua chân RX. Phần mềm `AT Command Parser` bên trong module phân tích cú pháp và hiểu rằng: "À, người dùng muốn tôi gửi một tin nhắn SMS đến số này".
+
+- Sau khi nhận được nội dung và ký tự `Ctrl+Z`, module tự động thực hiện toàn bộ quy trình phức tạp sau đây mà ESP32 không hề hay biết:
+
+  - Đóng gói nội dung vào định dạng `SMS-DELIVER` hoặc `SMS-SUBMIT` (theo chuẩn `3GPP`).
+
+  - Thiết lập kênh tín hiệu với trạm phát sóng (BTS) qua giao thức RRC (Radio Resource Control).
+
+  - Gửi yêu cầu SMS đến SMSC (Trung tâm tin nhắn) của nhà mạng qua kênh điều khiển (SDCCH hoặc NAS trên LTE).
+
+  - Chờ phản hồi CP-ACK từ mạng.
+
+  - Sau khi nhận xác nhận từ SMSC, module trả về `+CMGS: ID` (`ID` là do tổng đàu gán cho tin nhắn) và `OK` cho ESP32 qua chân TX.
+
+Tóm lại: UART chỉ là đường dây điện thoại bàn để cậu "nói" với module. Còn module là người thư ký thông minh, tự mình gọi điện đến nhà mạng và "đọc" nội dung tin nhắn cho họ ghi lại.
+
+### Tại Sao Nhà Sản Xuất Lại Thiết Kế Như Vậy?
+
+Bởi vì nó tuân theo nguyên tắc phân lớp (layering) và tính module hóa trong kỹ thuật điện tử:
+
+- Nhà phát triển ứng dụng (cậu) chỉ cần biết cách "nói chuyện" bằng tập lệnh AT đơn giản. Không cần quan tâm đến mật mã hóa 4G, điều chế QPSK/OFDM, hay thủ tục đăng ký mạng phức tạp.
+
+- Nhà sản xuất module (SIMCom) đã lo liệu hết phần "khó nhằn" nhất, tuân thủ nghiêm ngặt các tiêu chuẩn viễn thông toàn cầu (3GPP, ETSI).
+
+Nếu không có module này, để gửi được một tin nhắn SMS từ ESP32, cậu sẽ phải tự viết code cho toàn bộ chồng giao thức LTE – một công việc mà cả một đội ngũ kỹ sư của Qualcomm hay MediaTek mới làm nổi!
+
+### Gửi Tin Nhắn SMS: Từ AT Command Đến Code
+
+Để gửi một tin nhắn SMS, chúng ta sẽ "dịch" chính xác quy trình gõ lệnh AT bằng tay thành các hàm trong code.
+
+### Các Lệnh AT Cần Nhớ
+
+Quy trình chuẩn để gửi tin nhắn văn bản gồm 4 bước:
+
+- Thiết lập chế độ Text: `AT+CMGF=1`
+
+- Bắt đầu soạn tin: `AT+CMGS="+84xxxxxxxxx"`
+
+- Nhập nội dung: `Xin chao tu A7680C!` (Module sẽ phản hồi bằng dấu `>` để báo sẵn sàng nhận nội dung)
+
+- Gửi tin: Ký tự Ctrl+Z (mã `ASCII 26`, `0x1A`) để kết thúc
+
+### Code sẽ tự động gửi một tin nhắn khi khởi động
+
+```cpp
+#include <Arduino.h>
+#include <HardwareSerial.h>
+
+// Định nghĩa chân UART2 để giao tiếp với A7680C
+#define SIM_RX_PIN 16  // Chân RX2 (GPIO16) kết nối với chân TX của A7680C
+#define SIM_TX_PIN 17  // Chân TX2 (GPIO17) kết nối với chân RX của A7680C
+
+#define PHONE_NUMBER "+84327524504"
+
+bool smsSent = false;
+
+// Khởi tạo UART2
+HardwareSerial simSerial(2);
+
+void sendSMS(String number, String message);
+void printResponse();
+
+void setup() {
+  // Khởi tạo Serial Monitor (UART0) để giao tiếp với máy tính
+  Serial.begin(115200);
+  
+  // Khởi tạo UART2 để giao tiếp với module A7680C
+  simSerial.begin(115200, SERIAL_8N1, SIM_RX_PIN, SIM_TX_PIN);
+  
+  Serial.println("ESP32 UART Bridge + SMS Sender da san sang.");
+  Serial.println("Module se tu dong gui SMS sau 10 giay khoi dong.");
+  Serial.println("Ban van co the go lenh AT thu cong nhu truoc.");
+}
+
+void loop() {
+  // ---- Chức năng 1: Tự động gửi SMS sau khi khởi động ----
+  if (!smsSent) {
+    delay(10000); // Đợi 10 giây cho module chắc chắn sẵn sàng
+    sendSMS(PHONE_NUMBER, "Xin chao tu ESP32 va A7680C!");
+    smsSent = true;
+    Serial.println("\n>> SMS da duoc gui. Bay gio ban co the go lenh AT thu cong.\n");
+  }
+
+  // ---- Chức năng 2: Cầu nối UART (đọc/phát giữa module và Serial Monitor) ----
+  if (simSerial.available()) {
+    while (simSerial.available()) {
+      Serial.write(simSerial.read());
+    }
+  }
+
+  if (Serial.available()) {
+    String command = Serial.readString();
+    simSerial.print(command);
+  }
+}
+
+/**
+ * Hàm gửi tin nhắn SMS ở chế độ Text
+ */
+void sendSMS(String number, String message) {
+  Serial.println(">> Bat dau gui SMS...");
+
+  // Bước 1: Chọn chế độ Text
+  simSerial.println("AT+CMGF=1");
+  delay(200);
+  Serial.println("[1] Da chon Text Mode");
+
+  // Bước 2: Bắt đầu soạn tin
+  String cmd = "AT+CMGS=\"" + number + "\"";
+  simSerial.println(cmd);
+  delay(200);
+  Serial.println("[2] Dang nhap so dien thoai...");
+
+  // Bước 3: Gửi nội dung
+  simSerial.print(message);
+  delay(200);
+  Serial.println("[3] Dang nhap noi dung...");
+
+  // Bước 4: Gửi ký tự Ctrl+Z để kết thúc
+  simSerial.write(0x1A);
+  delay(5000); // Đợi module trả kết quả
+
+  Serial.println("[4] Da gui lenh ket thuc (Ctrl+Z)");
+  Serial.print(">> Phan hoi tu module: ");
+  printResponse();
+}
+
+/**
+ * Hàm đọc phản hồi từ module trong 3 giây và in ra
+ */
+void printResponse() {
+  unsigned long timeout = millis() + 3000;
+  while (millis() < timeout) {
+    while (simSerial.available()) {
+      Serial.write(simSerial.read());
+    }
+  }
+  Serial.println();
+}
+```
+
+Mở Serial Monitor để quan sát log nhé!
+
+### Code gửi SMS khi có 1 sự kiện xảy ra
+
+Tình huống: Sử dụng 1 Push Button để gửi SMS
+
+Mục tiêu:
+
+- Khi chưa nhấn nút: ESP32 vẫn hoạt động như một "cầu nối UART" để cậu có thể gõ lệnh AT kiểm tra bất cứ lúc nào.
+
+- Khi nhấn nút (nối GPIO13 xuống GND): ESP32 sẽ gửi ngay một tin nhắn SMS đến số điện thoại đã cài đặt.
+
+- Chống dội (debounce) để mỗi lần nhấn chỉ gửi một tin nhắn duy nhất.
+
+```cpp
+#include <Arduino.h>
+#include <HardwareSerial.h>
+
+// ========== CẤU HÌNH PHẦN CỨNG ==========
+#define SIM_RX_PIN 16      // Chân RX2 (GPIO16) -> TX của A7680C
+#define SIM_TX_PIN 17      // Chân TX2 (GPIO17) -> RX của A7680C
+#define BUTTON_PIN 13      // Chân nút nhấn (active LOW)
+
+// Số điện thoại nhận SMS (định dạng quốc tế)
+#define PHONE_NUMBER "+84342165945"
+
+// ========== BIẾN TOÀN CỤC ==========
+HardwareSerial simSerial(2);
+
+bool smsInProgress = false;           // Cờ báo đang gửi SMS, tránh gửi chồng lệnh
+
+unsigned long lastDebounceTime = 0;   // Thời điểm thay đổi trạng thái nút gần nhất
+unsigned long debounceDelay = 50;     // Khoảng thời gian chống dội (50ms)
+int lastButtonState = HIGH;           // Trạng thái trước đó của nút
+int buttonState = HIGH;               // Trạng thái hiện tại của nút (đã được ổn định)
+
+void setup() {
+  Serial.begin(115200);
+  simSerial.begin(115200, SERIAL_8N1, SIM_RX_PIN, SIM_TX_PIN);
+
+  // Cấu hình nút nhấn: dùng điện trở kéo lên nội (INPUT_PULLUP)
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  Serial.println("ESP32 UART Bridge + SMS Button da san sang.");
+  Serial.println("Nhan nut (GPIO13 -> GND) de gui SMS.");
+  Serial.println("Ban van co the go lenh AT thu cong nhu binh thuong.\n");
+
+  // Đợi module khởi động (tự động nhờ mạch auto-power)
+  delay(10000);
+  Serial.println(">> Module A7680C da san sang.\n");
+}
+
+void loop() {
+  // ---------- XỬ LÝ NÚT NHẤN (CÓ CHỐNG DỘI) ----------
+  int reading = digitalRead(BUTTON_PIN);
+
+  // Nếu trạng thái đọc khác với trạng thái trước đó, reset thời gian debounce
+  if (reading != lastButtonState) {
+    lastDebounceTime = millis();
+  }
+
+  // Nếu đã qua thời gian debounce, cập nhật trạng thái nút ổn định
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    // Nếu trạng thái ổn định thay đổi so với trước đó
+    if (reading != buttonState) {
+      buttonState = reading;
+
+      // Chỉ kích hoạt khi nút được nhấn (LOW) và không đang gửi SMS
+      if (buttonState == LOW && !smsInProgress) {
+        Serial.println("\n>> Nut duoc nhan! Dang gui SMS...");
+        sendSMS(PHONE_NUMBER, "Canh bao: Co nguoi nhan nut!");
+      }
+    }
+  }
+  lastButtonState = reading;
+
+  // ---------- CẦU NỐI UART (GIỮ NGUYÊN) ----------
+  if (simSerial.available()) {
+    while (simSerial.available()) {
+      Serial.write(simSerial.read());
+    }
+  }
+
+  if (Serial.available()) {
+    String command = Serial.readString();
+    simSerial.print(command);
+  }
+}
+
+/**
+ * Hàm gửi tin nhắn SMS ở chế độ Text
+ */
+void sendSMS(String number, String message) {
+  smsInProgress = true;   // Đặt cờ để không bị gửi đè
+
+  // Bước 1: Chọn chế độ Text
+  simSerial.println("AT+CMGF=1");
+  delay(200);
+  Serial.println("[1] Text Mode");
+
+  // Bước 2: Bắt đầu soạn tin
+  String cmd = "AT+CMGS=\"" + number + "\"";
+  simSerial.println(cmd);
+  delay(200);
+  Serial.println("[2] Dang nhap so dien thoai...");
+
+  // Bước 3: Gửi nội dung
+  simSerial.print(message);
+  delay(200);
+  Serial.println("[3] Dang nhap noi dung...");
+
+  // Bước 4: Gửi Ctrl+Z
+  simSerial.write(0x1A);
+  delay(5000);  // Đợi phản hồi
+
+  Serial.println("[4] Da gui lenh ket thuc.");
+  Serial.print(">> Phan hoi: ");
+  printResponse();
+
+  smsInProgress = false;  // Hoàn tất, sẵn sàng cho lần nhấn tiếp theo
+}
+
+/**
+ * Đọc phản hồi từ module trong 3 giây
+ */
+void printResponse() {
+  unsigned long timeout = millis() + 3000;
+  while (millis() < timeout) {
+    while (simSerial.available()) {
+      Serial.write(simSerial.read());
+    }
+  }
+  Serial.println();
+}
+```
