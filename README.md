@@ -378,7 +378,7 @@ Mục tiêu:
 #define BUTTON_PIN 13      // Chân nút nhấn (active LOW)
 
 // Số điện thoại nhận SMS (định dạng quốc tế)
-#define PHONE_NUMBER "+84342165945"
+#define PHONE_NUMBER "+84327524504"
 
 // ========== BIẾN TOÀN CỤC ==========
 HardwareSerial simSerial(2);
@@ -389,6 +389,9 @@ unsigned long lastDebounceTime = 0;   // Thời điểm thay đổi trạng thá
 unsigned long debounceDelay = 50;     // Khoảng thời gian chống dội (50ms)
 int lastButtonState = HIGH;           // Trạng thái trước đó của nút
 int buttonState = HIGH;               // Trạng thái hiện tại của nút (đã được ổn định)
+
+void sendSMS(String number, String message);
+void printResponse();
 
 void setup() {
   Serial.begin(115200);
@@ -487,5 +490,1028 @@ void printResponse() {
     }
   }
   Serial.println();
+}
+```
+
+## Module SIM thực hiện cuộc gọi VoLTE
+
+### Bước 1: "Giấy Thông Hành" - Điều Kiện Tiên Quyết Để Gọi Được VoLTE
+
+Không giống như gửi SMS, chức năng gọi thoại trên nền 4G yêu cầu một "tấm vé" đặc biệt.
+
+- SIM Phải Kích Hoạt VoLTE: Có thể dùng chính số điện thoại đang lắp trong module để soạn tin nhắn:
+
+  - Viettel: `HDCALL` gửi `191`
+
+  - VinaPhone: `HDCALL` gửi `888`
+
+- Module Phải Đăng Ký Mạng Thành Công: Dùng lại lệnh `AT+CREG?` kiểm tra. Phản hồi `+CREG: 0,1` là tín hiệu tốt, nghĩa là module đã sẵn sàng.
+
+- Chuẩn Bị Antenna & Nguồn: Antenna phải được gắn chặt và nguồn 5V/3A phải thật ổn định. Cuộc gọi là lúc module tiêu thụ dòng điện lớn nhất, nguồn yếu có thể khiến module tự ngắt hoặc reset ngay lập tức.
+
+### Bước 2: "Ngôn Ngữ Giao Tiếp" - Giải Mã Các Lệnh AT Điều Khiển Cuộc Gọi
+
+Giống như SMS, việc gọi điện cũng được điều khiển qua UART bằng các lệnh AT đặc biệt.
+
+| Lệnh AT | Mô tả chức năng | Ví dụ minh họa |
+| --- | --- | --- |
+| ATD\<number\>; | Lệnh quay số để bắt đầu cuộc gọi. Lưu ý: Dấu chấm phẩy ; ở cuối là bắt buộc. | ATD+84327524504; |
+| ATH | Lệnh kết thúc cuộc gọi hiện tại (gác máy). | ATH |
+| ATA | Lệnh trả lời khi có một cuộc gọi đến. | ATA |
+| AT+CHUP | Một lệnh khác cũng để kết thúc cuộc gọi, đảm bảo ngắt kết nối. | AT+CHUP |
+| AT+CLCC | Lệnh "kiểm tra phòng khám". Nó liệt kê tất cả các cuộc gọi đang hoạt động và trạng thái của chúng. Rất hữu ích để debug. | AT+CLCC |
+
+Cơ Chế Hoạt Động Đằng Sau Một Lệnh `ATD`
+
+Khi gửi lệnh `ATD+84327524504;`, module A7680C sẽ tự động thực hiện một loạt thao tác phức tạp:
+
+- Nó sẽ yêu cầu nhà mạng thiết lập một kênh thoại VoLTE chất lượng cao, ưu tiên hơn hẳn kênh dữ liệu thông thường.
+
+- Điện thoại được liên lạc sẽ đổ chuông.
+
+- Nếu bắt máy, module sẽ báo về OK và trạng thái cuộc gọi sẽ là "active". Nếu không, nó sẽ báo lỗi `NO CARRIER` hoặc `BUSY`.
+
+### Bước 3: Code Mẫu - Lắp Ráp Mọi Thứ Lại Với Nhau
+
+Dựa trên code có nút nhấn gửi SMS ở giai đoạn trước, chúng ta sẽ nâng cấp để nút nhấn thực hiện luân phiên cả hai chức năng: Nhấn lần 1 để gọi, nhấn lần 2 để gác máy.
+
+File `src/main.cpp`
+
+```cpp
+#include <Arduino.h>
+#include <HardwareSerial.h>
+
+// ========== CẤU HÌNH PHẦN CỨNG ==========
+#define SIM_RX_PIN 16
+#define SIM_TX_PIN 17
+#define BUTTON_PIN 13
+#define PHONE_NUMBER "+84327524504"
+
+// ========== KHAI BÁO HÀM ==========
+bool waitForModuleReady(unsigned long timeoutMs);
+String readResponse(unsigned long timeoutMs);
+void makeCall(String number);
+void hangUpCall();
+
+// ========== BIẾN TOÀN CỤC ==========
+HardwareSerial simSerial(2);
+bool callInProgress = false;
+unsigned long lastDebounceTime = 0;
+unsigned long debounceDelay = 50;
+int lastButtonState = HIGH;
+int buttonState = HIGH;
+bool moduleReadyForCall = false;
+
+// ========== SETUP ==========
+void setup() {
+  Serial.begin(115200);
+  simSerial.begin(115200, SERIAL_8N1, SIM_RX_PIN, SIM_TX_PIN);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  Serial.println("ESP32 Call Manager (Simple & Reliable)");
+  Serial.println("Dang cho module san sang cho cuoc goi...");
+
+  if (waitForModuleReady(60000)) {
+    moduleReadyForCall = true;
+    Serial.println(">> Module da san sang cho cuoc goi VoLTE.\n");
+  } else {
+    Serial.println(">> Canh bao: Module khong san sang sau 60s. Van co the thu goi.\n");
+  }
+}
+
+// ========== LOOP ==========
+void loop() {
+  // Xử lý nút nhấn
+  int reading = digitalRead(BUTTON_PIN);
+  if (reading != lastButtonState) lastDebounceTime = millis();
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    if (reading != buttonState) {
+      buttonState = reading;
+      if (buttonState == LOW) {
+        if (!callInProgress) {
+          Serial.println("\n>> Nut duoc nhan! Dang thuc hien cuoc goi...");
+          makeCall(PHONE_NUMBER);
+        } else {
+          Serial.println("\n>> Nut duoc nhan! Dang ngat cuoc goi...");
+          hangUpCall();
+        }
+      }
+    }
+  }
+  lastButtonState = reading;
+
+  // Cầu nối UART
+  if (simSerial.available()) {
+    while (simSerial.available()) Serial.write(simSerial.read());
+  }
+  if (Serial.available()) {
+    simSerial.print(Serial.readString());
+  }
+}
+
+// ========== CHỜ MODULE SẴN SÀNG ==========
+bool waitForModuleReady(unsigned long timeoutMs) {
+  unsigned long start = millis();
+  while (millis() - start < timeoutMs) {
+    simSerial.println("AT+CREG?");
+    String resp = readResponse(500);
+    if (resp.indexOf("+CREG: 0,1") >= 0 || resp.indexOf("+CREG: 0,5") >= 0) {
+      return true;
+    }
+    delay(1000);
+    Serial.print(".");
+  }
+  Serial.println();
+  return false;
+}
+
+// ========== ĐỌC PHẢN HỒI ==========
+String readResponse(unsigned long timeoutMs) {
+  String resp;
+  unsigned long start = millis();
+  while (millis() - start < timeoutMs) {
+    while (simSerial.available()) {
+      char c = simSerial.read();
+      resp += c;
+      Serial.write(c);
+    }
+    delay(10);
+  }
+  return resp;
+}
+
+// ========== THỰC HIỆN CUỘC GỌI ==========
+void makeCall(String number) {
+  if (!moduleReadyForCall) {
+    Serial.println("Module chua san sang, dang kiem tra lai...");
+    if (waitForModuleReady(30000)) {
+      moduleReadyForCall = true;
+    } else {
+      Serial.println("Loi: Khong the ket noi mang. Huy cuoc goi.");
+      return;
+    }
+  }
+
+  String cmd = "ATD" + number + ";";
+  simSerial.println(cmd);
+  Serial.println("Lenh AT: " + cmd);
+
+  String resp = readResponse(10000);
+  if (resp.indexOf("OK") >= 0) {
+    Serial.println(">> Dang quay so...");
+    callInProgress = true;
+  } else {
+    Serial.println(">> Loi ATD: " + resp);
+    callInProgress = false;
+  }
+}
+
+// ========== KẾT THÚC CUỘC GỌI ==========
+void hangUpCall() {
+  simSerial.println("ATH");
+  Serial.println("Lenh AT: ATH");
+  delay(2000);
+  callInProgress = false;
+  Serial.println(">> Da ngat cuoc goi.\n");
+}
+```
+
+Log trên Monitor:
+
+```bash
+ESP32 UART Bridge + SMS/Call Button da san sang.
+Nhan nut (GPIO13 -> GND) de thuc hien:
+- Neu chua goi: Se goi den so +84327524504
+- Neu dang goi: Se ngat cuoc goi.
+Ban van co the go lenh AT thu cong nhu binh thuong.
+
+>> Module A7680C da san sang.
+
+
+>> Nut duoc nhan! Dang thuc hien cuoc goi...
+Lenh AT da gui: ATD+84327524504;
+Trang thai cuoc goi (AT+CLCC):
+ATD+84327524504;
+OK
+
++CGEV: NW ACT 8,10
+
++CLCC: 1,0,2,0,0,"+84327524504",145,""
+
++CGEV: NW MODIFY 10,3
+
++CLCC: 1,0,3,0,0,"+84327524504",145,""
+AT+CLCC
++CLCC: 1,0,3,0,0,"+84327524504",145,""
+
+OK
+
+>> Cuoc goi da duoc thuc hien. Nhan nut lan nua de ngat.
+
+
+VOICE CALL: BEGIN
+
++CLCC: 1,0,0,0,0,"+84327524504",145,""
+
++COLP: "+84327524504",145
+
++CGEV: NW DEACT 8,10
+
++CLCC: 1,0,6,0,0,"+84327524504",145,""
+
+VOICE CALL: END: 000004
+
+NO CARRIER
+
+>> Nut duoc nhan! Dang ngat cuoc goi...
+Lenh AT da gui: ATH
+>> Cuoc goi da ket thuc.
+
+ATH
+OK
+
+>> Nut duoc nhan! Dang thuc hien cuoc goi...
+Lenh AT da gui: ATD+84327524504;
+Trang thai cuoc goi (AT+CLCC):
+ATD+84327524504;
+OK
+
++CGEV: NW ACT 8,10
+
++CLCC: 1,0,2,0,0,"+84327524504",145,""
+
++CGEV: NW MODIFY 10,3
+
++CLCC: 1,0,3,0,0,"+84327524504",145,""
+AT+CLCC
++CLCC: 1,0,3,0,0,"+84327524504",145,""
+
+OK
+
+>> Cuoc goi da duoc thuc hien. Nhan nut lan nua de ngat.
+
+
+>> Nut duoc nhan! Dang ngat cuoc goi...
+Lenh AT da gui: ATH
+>> Cuoc goi da ket thuc.
+
+ATH
+OK
+
++CGEV: NW DEACT 8,10
+
++CLCC: 1,0,6,0,0,"+84327524504",145,""
+
+VOICE CALL: END
+
+NO CARRIER.
+```
+
+Trên đây là phiên bản code test sơ cơ bản để thực hiện xem cuộc gọi VoLTE đã được thực hiện chưa. Người dùng cần:
+
+- Tắt WiFi, bật dữ liệu di động 4G/5G
+
+- Thử mở 1 video youtube để phát
+
+Lúc này hãy thử nhấn nút để Module SIM thực hiện cuộc gọi
+
+- Nếu điện thoại nhận được cuộc gọi và video youtube vẫn tiếp tục phát mà không bị dừng lại thì nghĩa là Module SIM đã thực hiện thành công cuộc gọi VoLTE
+
+Nhưng **code vẫn tồn tại 1 số vấn đề**
+
+Mình thực hiện 2 tính huống test như sau:
+
+- Lần 1: nhấn nút nhấn, Module SIM thực hiện cuộc gọi đến số điện thoại được chỉ định, điện thoại đã đổ chuông, người dùng bắt máy, sau đó người dùng gác máy kết thúc cuộc gọi nhưng Module hình như chưa kết thúc mà phải chờ nhấn nút nhấn lần nữa mới kết thúc.
+
+- Lần 2: nhấn nút nhấn, module thực hiện cuộc gọi đến số điện thoại được chỉ định, điện thoại đổ chuông nhưng người dùng chưa bắt máy, lúc này nhấn nút nhấn lại 1 lần nữa để tắt cuộc gọi từ Module SIM nhưng điện thoại của người dùng vẫn còn đổ chuông.
+
+Mình thử tìm hiểu về việc quản lý trạng thái cuộc gọi VoLTE khi làm việc với Module SIM thì được biết là **do logic code hiện tại chưa đồng bộ với cách module A7680C phản hồi sự kiện.**
+
+Từ log trên Monitor, hãy phân tích
+
+#### Đọc Log: "Module Đang Nói Gì?"
+
+Module đã gửi rất nhiều tín hiệu (`URC - Unsolicited Result Code`) quan trọng mà code hiện tại đang bỏ qua hoàn toàn.
+
+```bash
+VOICE CALL: BEGIN          ← Module báo: Cuộc gọi đã thực sự bắt đầu (người dùng bắt máy)
+
++CLCC: 1,0,0,0,0,"+84...   ← Trạng thái cuộc gọi: '0' = ACTIVE (đang nói chuyện)
+
+NO CARRIER                 ← Module báo: Cuộc gọi đã kết thúc (người dùng gác máy)
+```
+
+Vấn đề cốt lõi: Code hiện tại chỉ gửi lệnh và `delay()`, không có cơ chế lắng nghe và phân tích những `URC` này. Module "hét vào tai" ESP32 là "Người ta cúp máy rồi này!" nhưng ESP32 "giả vờ không nghe thấy", vẫn giữ biến `callInProgress = true`.
+
+#### Giải Thích Sâu Hơn Về Từng Vấn Đề
+
+Vấn Đề 1: "Điện Thoại Gác Máy Nhưng Module Vẫn Tưởng Đang Gọi"
+
+- Nguyên nhân: Khi gác máy, module A7680C đã biết cuộc gọi kết thúc và phát ra `URC` `NO CARRIER` và `VOICE CALL: END: ...`. Code không có hàm `readResponse()` để bắt sự kiện này, nên biến `callInProgress` không tự động cập nhật về `false`. Module đã kết thúc cuộc gọi, nhưng "trí nhớ" của ESP32 vẫn nghĩ là đang gọi.
+
+- Kết quả: Phải nhấn nút thêm một lần nữa để gửi lệnh `ATH`, nhưng lệnh này không có tác dụng vì module không còn trong cuộc gọi nào cả. Đây là lý do thấy `OK` sau `ATH` nhưng không có gì thay đổi.
+
+Vấn Đề 2: "Module Tắt Máy Nhưng Điện Thoại Vẫn Đổ Chuông"
+
+- Nguyên nhân: Nhấn nút khi điện thoại đang đổ chuông. Lệnh `ATH` được gửi đi, module nhận và trả về `OK`. Tuy nhiên, mạng VoLTE đã "bắt tay" xong với điện thoại của cậu. Việc module gửi tín hiệu hủy cuộc gọi có thể bị mạng từ chối hoặc chậm trễ, dẫn đến điện thoại vẫn tiếp tục đổ chuông.
+
+- Kết quả: Module nghĩ nó đã hủy cuộc gọi (trả về `OK`), nhưng phía điện thoại chưa nhận được tín hiệu hủy từ nhà mạng. Đây là một "hành vi lạ" thường gặp với lệnh `ATH` khi cuộc gọi chưa được thiết lập hoàn toàn (chưa có trạng thái `ACTIVE`).
+
+### Giải Pháp : Làm Cho ESP32 Biết Lắng Nghe
+
+Cần cải tiến code từ "gửi và quên" thành "gửi và lắng nghe".
+
+#### 1. Hàm Đọc URC Đáng Tin Cậy
+
+Thay vì đọc một lần, cần một vòng lặp đọc liên tục trong một khoảng thời gian ngắn.
+
+```cpp
+String readURC(unsigned long timeoutMs = 2000) {
+    String response = "";
+    unsigned long start = millis();
+    while (millis() - start < timeoutMs) {
+        while (simSerial.available()) {
+            char c = simSerial.read();
+            response += c;
+        }
+        delay(10); // Cho module thở
+    }
+    return response;
+}
+```
+
+#### 2. Đặt Cờ `callInProgress` Bằng Cách Nghe `URC`
+
+Khi gọi lệnh `ATD`, cần nghe module phản hồi để biết cuộc gọi có thành công hay không.
+
+```cpp
+void makeCall(String number) {
+  String cmd = "ATD" + number + ";";
+  simSerial.println(cmd);
+  
+  // Nghe module trả lời trong 10 giây
+  String urc = readURC(10000);
+  
+  if (urc.indexOf("OK") != -1) {
+    Serial.println(">> Dang quay so...");
+    // Chờ thêm để xem có CONNECT hoặc NO CARRIER không
+    urc = readURC(30000); // Chờ 30 giây để người dùng bắt máy
+    if (urc.indexOf("VOICE CALL: BEGIN") != -1 || urc.indexOf("CONNECT") != -1) {
+      Serial.println(">> Cuoc goi da duoc ket noi.");
+      callInProgress = true;
+    } else {
+      Serial.println(">> Cuoc goi khong thanh cong (NO CARRIER/BUSY).");
+      callInProgress = false;
+    }
+  } else {
+    Serial.println(">> Loi ATD: " + urc);
+    callInProgress = false;
+  }
+}
+```
+
+#### 3. Kiểm Tra URC Định Kỳ Trong `loop()`
+
+Cần một cơ chế chạy nền để cập nhật trạng thái `callInProgress` khi module tự động báo `NO CARRIER`.
+
+```cpp
+void checkCallState() {
+  if (simSerial.available()) {
+    String urc = simSerial.readString();
+    Serial.print("URC: " + urc); // In ra để debug
+    
+    if (urc.indexOf("NO CARRIER") != -1 || urc.indexOf("VOICE CALL: END") != -1) {
+      if (callInProgress) {
+        Serial.println(">> Phat hien URC: Cuoc goi ket thuc.");
+        callInProgress = false;
+      }
+    }
+    // Có thể thêm xử lý URC khác ở đây
+  }
+}
+```
+
+Trong hàm `loop()`, sẽ gọi `checkCallState()` thường xuyên thay vì chỉ đọc UART một lần.
+
+#### 4. Code Xử Lý URC và Đồng Bộ Trạng Thái
+
+Tóm lại vấn đề chính đang nằm trong code là **thiếu đồng bộ trạng thái giữa ESP32 và Module SIM**. Module đã kết thúc cuộc gọi (`NO CARRIER`) nhưng ESP32 vẫn nghĩ `callInProgress = true`. Còn khi đang đổ chuông, `ATH` có thể không ngắt được ngay.
+
+```cpp
+#include <Arduino.h>
+#include <HardwareSerial.h>
+
+// ======================== PHẦN CỨNG ========================
+#define SIM_RX_PIN         16      // ESP32 RX2  -> Module TX
+#define SIM_TX_PIN         17      // ESP32 TX2  -> Module RX
+#define BUTTON_PIN         13      // Nút nhấn active LOW
+#define PHONE_NUMBER       "+84833538486"
+
+// ======================== THAM SỐ HOẠT ĐỘNG ========================
+constexpr unsigned long MODULE_BOOT_DELAY   = 10000;
+constexpr unsigned long DEBOUNCE_DELAY_MS   = 50;
+constexpr unsigned long AT_RESPONSE_TIMEOUT = 1000;
+constexpr unsigned long CALL_SETUP_TIMEOUT  = 10000;
+constexpr unsigned long HANGUP_TIMEOUT      = 3000;
+constexpr unsigned long NETWORK_READY_TIMEOUT = 60000;
+
+// ======================== TRẠNG THÁI CUỘC GỌI ========================
+enum CallState : int {
+  ACTIVE = 0,
+  HELD = 1,
+  DIALING = 2,
+  ALERTING = 3,
+  INCOMING = 4,
+  DISCONNECT = 6
+};
+
+// ======================== BIẾN TOÀN CỤC ========================
+HardwareSerial simSerial(2);
+
+struct Button {
+  const uint8_t pin;
+  bool lastState;
+  bool currentState;
+  unsigned long lastDebounceTime;
+  const unsigned long debounceDelay;
+
+  Button(uint8_t p, unsigned long delayMs)
+    : pin(p), lastState(HIGH), currentState(HIGH), lastDebounceTime(0), debounceDelay(delayMs) {}
+} button(BUTTON_PIN, DEBOUNCE_DELAY_MS);
+
+bool callInProgress = false;
+bool moduleReadyForCall = false;
+String urcLineBuffer = "";
+
+// ======================== KHAI BÁO HÀM ========================
+void cleanSerialBuffer();
+String readModuleResponse(unsigned long timeoutMs);
+bool waitForNetworkReady();
+void handleUnsolicitedCode(const String& urcLine);
+bool isCallActiveFromCLCC(const String& clccResponse);
+bool isCallActive();
+void makeCall(const String& number);
+void hangUpCall();
+bool isButtonPressed();
+
+// ======================== SETUP ========================
+void setup() {
+  Serial.begin(115200);
+  simSerial.begin(115200, SERIAL_8N1, SIM_RX_PIN, SIM_TX_PIN);
+  pinMode(button.pin, INPUT_PULLUP);
+
+  Serial.println(F("ESP32 Smart Call Manager (Final)"));
+  Serial.println(F("Nhan nut (GPIO13 -> GND):"));
+  Serial.println(F("  - Chua goi -> Goi den " PHONE_NUMBER));
+  Serial.println(F("  - Dang goi -> Ngat cuoc goi."));
+  Serial.println(F("Ban van co the go lenh AT thu cong.\n"));
+
+  Serial.print(F("Dang cho module san sang..."));
+  moduleReadyForCall = waitForNetworkReady();
+  if (moduleReadyForCall) {
+    Serial.println(F("\n>> Module A7680C da san sang cho cuoc goi VoLTE.\n"));
+  } else {
+    Serial.println(F("\n>> Canh bao: Module khong the dang ky mang sau 60s. Van co the thu goi.\n"));
+  }
+  cleanSerialBuffer();
+}
+
+// ======================== LOOP ========================
+void loop() {
+  // 1. Đọc và xử lý URC từ module
+  while (simSerial.available()) {
+    char c = simSerial.read();
+    urcLineBuffer += c;
+    Serial.write(c);
+    if (c == '\n') {
+      handleUnsolicitedCode(urcLineBuffer);
+      urcLineBuffer = "";
+    }
+  }
+
+  // 2. Xử lý nút nhấn
+  if (isButtonPressed()) {
+    // 🔥 Cập nhật trạng thái thực tế từ module trước khi quyết định
+    bool activeNow = isCallActive();
+
+    if (!activeNow) {
+      Serial.println(F("\n>> Goi di..."));
+      makeCall(PHONE_NUMBER);
+    } else {
+      Serial.println(F("\n>> Ngat cuoc goi..."));
+      hangUpCall();
+    }
+  }
+
+  // 3. Cầu nối UART thủ công
+  if (Serial.available()) {
+    String command = Serial.readString();
+    simSerial.print(command);
+  }
+}
+
+// ======================== CHỜ MẠNG SẴN SÀNG ========================
+bool waitForNetworkReady() {
+  unsigned long start = millis();
+  bool gsmOk = false, lteOk = false;
+  while (millis() - start < NETWORK_READY_TIMEOUT) {
+    simSerial.println("AT+CREG?");
+    String resp = readModuleResponse(AT_RESPONSE_TIMEOUT);
+    if (resp.indexOf("+CREG: 0,1") >= 0 || resp.indexOf("+CREG: 0,5") >= 0) gsmOk = true;
+
+    simSerial.println("AT+CEREG?");
+    resp = readModuleResponse(AT_RESPONSE_TIMEOUT);
+    if (resp.indexOf("+CEREG: 0,1") >= 0 || resp.indexOf("+CEREG: 0,5") >= 0) lteOk = true;
+
+    if (gsmOk && lteOk) return true;
+    delay(1000);
+    Serial.print(".");
+  }
+  return false;
+}
+
+// ======================== TIỆN ÍCH ========================
+void cleanSerialBuffer() {
+  while (simSerial.available()) simSerial.read();
+  urcLineBuffer = "";
+}
+
+String readModuleResponse(unsigned long timeoutMs) {
+  String response;
+  response.reserve(128);
+  unsigned long start = millis();
+  while (millis() - start < timeoutMs) {
+    while (simSerial.available()) {
+      char c = simSerial.read();
+      response += c;
+      Serial.write(c);
+    }
+    delay(5);
+  }
+  return response;
+}
+
+// ======================== XỬ LÝ URC ========================
+void handleUnsolicitedCode(const String& urcLine) {
+  String line = urcLine;
+  line.trim();
+  if (line.isEmpty()) return;
+
+  if (line.indexOf("VOICE CALL: BEGIN") >= 0) {
+    Serial.println(F(">> URC: Cuoc goi da ket noi."));
+    callInProgress = true;
+  }
+  else if (line.indexOf("VOICE CALL: END") >= 0 || line.indexOf("NO CARRIER") >= 0) {
+    Serial.println(F(">> URC: Cuoc goi da ket thuc."));
+    callInProgress = false;
+  }
+  else if (line.indexOf("+CLCC:") >= 0) {
+    if (line.indexOf(",0,") >= 0) callInProgress = true;
+    else if (line.indexOf(",6,") >= 0) callInProgress = false;
+  }
+  else if (line.indexOf("BUSY") >= 0) {
+    Serial.println(F(">> URC: May ban."));
+    callInProgress = false;
+  }
+  else if (line.indexOf("NO ANSWER") >= 0) {
+    Serial.println(F(">> URC: Khong ai bat may."));
+    callInProgress = false;
+  }
+}
+
+// ======================== KIỂM TRA CUỘC GỌI ========================
+bool isCallActiveFromCLCC(const String& clccResponse) {
+  int pos = clccResponse.indexOf("+CLCC:");
+  if (pos == -1) return false;
+
+  int commaCount = 0, stateStart = -1;
+  for (unsigned i = pos; i < clccResponse.length(); ++i) {
+    if (clccResponse[i] == ',') {
+      ++commaCount;
+      if (commaCount == 2) { stateStart = i + 1; break; }
+    }
+  }
+  if (stateStart == -1 || stateStart >= (int)clccResponse.length()) return false;
+
+  int state = clccResponse[stateStart] - '0';
+  return (state == CallState::ACTIVE || state == CallState::DIALING || state == CallState::ALERTING);
+}
+
+bool isCallActive() {
+  simSerial.println("AT+CLCC");
+  String resp = readModuleResponse(AT_RESPONSE_TIMEOUT);
+  bool active = isCallActiveFromCLCC(resp);
+  callInProgress = active;  // Đồng bộ với trạng thái thực tế
+  return active;
+}
+
+// ======================== THỰC HIỆN CUỘC GỌI ========================
+void makeCall(const String& number) {
+  if (!moduleReadyForCall) {
+    Serial.println(F(">> Module chua san sang, dang kiem tra lai..."));
+    moduleReadyForCall = waitForNetworkReady();
+    if (!moduleReadyForCall) {
+      Serial.println(F(">> Loi: Module khong co ket noi mang."));
+      return;
+    }
+  }
+
+  cleanSerialBuffer();
+  String cmd = "ATD" + number + ";";
+  simSerial.println(cmd);
+  Serial.println("Lenh AT: " + cmd);
+
+  String resp = readModuleResponse(CALL_SETUP_TIMEOUT);
+  if (resp.indexOf("OK") >= 0) {
+    Serial.println(F(">> Dang quay so..."));
+    callInProgress = true;  // 🔥 Đặt cờ ngay để ngăn nhấn nút gọi lại
+  } else {
+    Serial.println(">> Loi ATD: " + resp);
+    callInProgress = false;
+  }
+}
+
+// ======================== KẾT THÚC CUỘC GỌI ========================
+void hangUpCall() {
+  Serial.println(F(">> Dang ngat cuoc goi..."));
+  cleanSerialBuffer();
+
+  // Gửi ATH trước
+  simSerial.println("ATH");
+  String resp = readModuleResponse(HANGUP_TIMEOUT);
+  if (resp.indexOf("OK") >= 0) {
+    Serial.println(F(">> Da gui ATH."));
+  } else {
+    // Thử AT+CHUP nếu ATH thất bại
+    simSerial.println("AT+CHUP");
+    resp = readModuleResponse(HANGUP_TIMEOUT);
+    if (resp.indexOf("OK") >= 0) {
+      Serial.println(F(">> Da gui AT+CHUP."));
+    }
+  }
+
+  delay(2000); // Đợi module xử lý
+
+  // Kiểm tra lại xem cuộc gọi đã kết thúc chưa
+  if (isCallActive()) {
+    Serial.println(F(">> Cuoc goi van chua ket thuc, thu lai AT+CHUP..."));
+    simSerial.println("AT+CHUP");
+    readModuleResponse(1000);
+  }
+
+  callInProgress = false;  // Đặt lại cờ, URC sẽ xác nhận nếu cần
+  Serial.println(F(">> Da dat lai trang thai.\n"));
+}
+
+// ======================== NÚT NHẤN CHỐNG DỘI ========================
+bool isButtonPressed() {
+  int reading = digitalRead(button.pin);
+  if (reading != button.lastState) button.lastDebounceTime = millis();
+  if ((millis() - button.lastDebounceTime) > button.debounceDelay) {
+    if (reading != button.currentState) {
+      button.currentState = reading;
+      if (button.currentState == LOW) return true;
+    }
+  }
+  button.lastState = reading;
+  return false;
+}
+```
+
+## Code Gửi SMS và Gọi
+
+```cpp
+#include <Arduino.h>
+#include <HardwareSerial.h>
+
+// ======================== PHẦN CỨNG ========================
+#define SIM_RX_PIN         16      // ESP32 RX2  -> Module TX
+#define SIM_TX_PIN         17      // ESP32 TX2  -> Module RX
+#define BUTTON_PIN         13      // Nút nhấn active LOW
+#define PHONE_NUMBER       "+84833538486"
+
+// ======================== THAM SỐ HOẠT ĐỘNG ========================
+constexpr unsigned long MODULE_BOOT_DELAY   = 10000;
+constexpr unsigned long DEBOUNCE_DELAY_MS   = 50;
+constexpr unsigned long AT_RESPONSE_TIMEOUT = 1000;
+constexpr unsigned long CALL_SETUP_TIMEOUT  = 10000;
+constexpr unsigned long HANGUP_TIMEOUT      = 3000;
+constexpr unsigned long NETWORK_READY_TIMEOUT = 60000;
+constexpr unsigned long SMS_TIMEOUT         = 15000; // Thời gian tối đa chờ gửi SMS
+
+// ======================== TRẠNG THÁI CUỘC GỌI ========================
+enum CallState : int {
+  ACTIVE = 0,
+  HELD = 1,
+  DIALING = 2,
+  ALERTING = 3,
+  INCOMING = 4,
+  DISCONNECT = 6
+};
+
+// ======================== BIẾN TOÀN CỤC ========================
+HardwareSerial simSerial(2);
+
+struct Button {
+  const uint8_t pin;
+  bool lastState;
+  bool currentState;
+  unsigned long lastDebounceTime;
+  const unsigned long debounceDelay;
+
+  Button(uint8_t p, unsigned long delayMs)
+    : pin(p), lastState(HIGH), currentState(HIGH), lastDebounceTime(0), debounceDelay(delayMs) {}
+} button(BUTTON_PIN, DEBOUNCE_DELAY_MS);
+
+bool callInProgress = false;
+bool smsInProgress = false;       // Cờ đang gửi SMS
+bool moduleReadyForCall = false;
+String urcLineBuffer = "";
+
+// ======================== KHAI BÁO HÀM ========================
+void cleanSerialBuffer();
+String readModuleResponse(unsigned long timeoutMs);
+bool waitForNetworkReady();
+void handleUnsolicitedCode(const String& urcLine);
+bool isCallActiveFromCLCC(const String& clccResponse);
+bool isCallActive();
+void makeCall(const String& number);
+void hangUpCall();
+bool sendSMS(const String& number, const String& message);
+bool isButtonPressed();
+
+// ======================== SETUP ========================
+void setup() {
+  Serial.begin(115200);
+  simSerial.begin(115200, SERIAL_8N1, SIM_RX_PIN, SIM_TX_PIN);
+  pinMode(button.pin, INPUT_PULLUP);
+
+  Serial.println(F("ESP32 Smart SMS + Call Manager"));
+  Serial.println(F("Nhan nut (GPIO13 -> GND):"));
+  Serial.println(F("  - Neu khong co cuoc goi: Gui SMS -> Goi den " PHONE_NUMBER));
+  Serial.println(F("  - Neu dang goi: Ngat cuoc goi."));
+  Serial.println(F("Ban van co the go lenh AT thu cong.\n"));
+
+  Serial.print(F("Dang cho module san sang..."));
+  moduleReadyForCall = waitForNetworkReady();
+  if (moduleReadyForCall) {
+    Serial.println(F("\n>> Module A7680C da san sang.\n"));
+  } else {
+    Serial.println(F("\n>> Canh bao: Module khong the dang ky mang sau 60s. Van co the thu.\n"));
+  }
+  cleanSerialBuffer();
+}
+
+// ======================== LOOP ========================
+void loop() {
+  // 1. Đọc và xử lý URC từ module
+  while (simSerial.available()) {
+    char c = simSerial.read();
+    urcLineBuffer += c;
+    Serial.write(c);
+    if (c == '\n') {
+      handleUnsolicitedCode(urcLineBuffer);
+      urcLineBuffer = "";
+    }
+  }
+
+  // 2. Xử lý nút nhấn
+  if (isButtonPressed()) {
+    // Nếu đang có cuộc gọi -> ưu tiên ngắt
+    if (callInProgress) {
+      Serial.println(F("\n>> Ngat cuoc goi..."));
+      hangUpCall();
+    }
+    // Nếu không có cuộc gọi và không đang gửi SMS
+    else if (!smsInProgress) {
+      Serial.println(F("\n>> Nut duoc nhan! Bat dau gui SMS..."));
+      
+      // Gửi SMS
+      if (sendSMS(PHONE_NUMBER, "Canh bao: Co nguoi nhan nut!")) {
+        Serial.println(F(">> SMS da gui thanh cong. Dang thuc hien cuoc goi..."));
+        delay(1000); // Nghỉ 1 giây trước khi gọi
+        makeCall(PHONE_NUMBER);
+      } else {
+        Serial.println(F(">> Loi gui SMS. Huy cuoc goi."));
+      }
+    } else {
+      Serial.println(F(">> Dang gui SMS, vui long doi..."));
+    }
+  }
+
+  // 3. Cầu nối UART thủ công
+  if (Serial.available()) {
+    String command = Serial.readString();
+    simSerial.print(command);
+  }
+}
+
+// ======================== CHỜ MẠNG SẴN SÀNG ========================
+bool waitForNetworkReady() {
+  unsigned long start = millis();
+  bool gsmOk = false, lteOk = false;
+  while (millis() - start < NETWORK_READY_TIMEOUT) {
+    simSerial.println("AT+CREG?");
+    String resp = readModuleResponse(AT_RESPONSE_TIMEOUT);
+    if (resp.indexOf("+CREG: 0,1") >= 0 || resp.indexOf("+CREG: 0,5") >= 0) gsmOk = true;
+
+    simSerial.println("AT+CEREG?");
+    resp = readModuleResponse(AT_RESPONSE_TIMEOUT);
+    if (resp.indexOf("+CEREG: 0,1") >= 0 || resp.indexOf("+CEREG: 0,5") >= 0) lteOk = true;
+
+    if (gsmOk && lteOk) return true;
+    delay(1000);
+    Serial.print(".");
+  }
+  return false;
+}
+
+// ======================== TIỆN ÍCH ========================
+void cleanSerialBuffer() {
+  while (simSerial.available()) simSerial.read();
+  urcLineBuffer = "";
+}
+
+String readModuleResponse(unsigned long timeoutMs) {
+  String response;
+  response.reserve(128);
+  unsigned long start = millis();
+  while (millis() - start < timeoutMs) {
+    while (simSerial.available()) {
+      char c = simSerial.read();
+      response += c;
+      Serial.write(c);
+    }
+    delay(5);
+  }
+  return response;
+}
+
+// ======================== XỬ LÝ URC ========================
+void handleUnsolicitedCode(const String& urcLine) {
+  String line = urcLine;
+  line.trim();
+  if (line.isEmpty()) return;
+
+  if (line.indexOf("VOICE CALL: BEGIN") >= 0) {
+    Serial.println(F(">> URC: Cuoc goi da ket noi."));
+    callInProgress = true;
+  }
+  else if (line.indexOf("VOICE CALL: END") >= 0 || line.indexOf("NO CARRIER") >= 0) {
+    Serial.println(F(">> URC: Cuoc goi da ket thuc."));
+    callInProgress = false;
+  }
+  else if (line.indexOf("+CLCC:") >= 0) {
+    if (line.indexOf(",0,") >= 0) callInProgress = true;
+    else if (line.indexOf(",6,") >= 0) callInProgress = false;
+  }
+  else if (line.indexOf("BUSY") >= 0) {
+    Serial.println(F(">> URC: May ban."));
+    callInProgress = false;
+  }
+  else if (line.indexOf("NO ANSWER") >= 0) {
+    Serial.println(F(">> URC: Khong ai bat may."));
+    callInProgress = false;
+  }
+}
+
+// ======================== KIỂM TRA CUỘC GỌI ========================
+bool isCallActiveFromCLCC(const String& clccResponse) {
+  int pos = clccResponse.indexOf("+CLCC:");
+  if (pos == -1) return false;
+
+  int commaCount = 0, stateStart = -1;
+  for (unsigned i = pos; i < clccResponse.length(); ++i) {
+    if (clccResponse[i] == ',') {
+      ++commaCount;
+      if (commaCount == 2) { stateStart = i + 1; break; }
+    }
+  }
+  if (stateStart == -1 || stateStart >= (int)clccResponse.length()) return false;
+
+  int state = clccResponse[stateStart] - '0';
+  return (state == CallState::ACTIVE || state == CallState::DIALING || state == CallState::ALERTING);
+}
+
+bool isCallActive() {
+  simSerial.println("AT+CLCC");
+  String resp = readModuleResponse(AT_RESPONSE_TIMEOUT);
+  bool active = isCallActiveFromCLCC(resp);
+  callInProgress = active;
+  return active;
+}
+
+// ======================== GỬI SMS ========================
+bool sendSMS(const String& number, const String& message) {
+  smsInProgress = true;
+  bool success = false;
+
+  // Bước 1: Chọn chế độ Text
+  simSerial.println("AT+CMGF=1");
+  if (readModuleResponse(1000).indexOf("OK") == -1) {
+    Serial.println(F("Loi: Khong the chon Text Mode"));
+    smsInProgress = false;
+    return false;
+  }
+
+  // Bước 2: Gửi lệnh AT+CMGS
+  String cmd = "AT+CMGS=\"" + number + "\"";
+  simSerial.println(cmd);
+  
+  // Chờ prompt '>'
+  String resp = readModuleResponse(2000);
+  if (resp.indexOf('>') == -1) {
+    Serial.println(F("Loi: Khong nhan duoc prompt '>'"));
+    smsInProgress = false;
+    return false;
+  }
+
+  // Bước 3: Gửi nội dung
+  simSerial.print(message);
+  delay(100);
+  
+  // Bước 4: Gửi Ctrl+Z
+  simSerial.write(0x1A);
+  
+  // Chờ phản hồi +CMGS: hoặc ERROR
+  resp = readModuleResponse(SMS_TIMEOUT);
+  if (resp.indexOf("+CMGS:") >= 0) {
+    Serial.println(F(">> SMS da duoc gui."));
+    success = true;
+  } else {
+    Serial.println(F(">> Loi gui SMS."));
+  }
+
+  smsInProgress = false;
+  return success;
+}
+
+// ======================== THỰC HIỆN CUỘC GỌI ========================
+void makeCall(const String& number) {
+  if (!moduleReadyForCall) {
+    Serial.println(F(">> Module chua san sang, dang kiem tra lai..."));
+    moduleReadyForCall = waitForNetworkReady();
+    if (!moduleReadyForCall) {
+      Serial.println(F(">> Loi: Module khong co ket noi mang."));
+      return;
+    }
+  }
+
+  cleanSerialBuffer();
+  String cmd = "ATD" + number + ";";
+  simSerial.println(cmd);
+  Serial.println("Lenh AT: " + cmd);
+
+  String resp = readModuleResponse(CALL_SETUP_TIMEOUT);
+  if (resp.indexOf("OK") >= 0) {
+    Serial.println(F(">> Dang quay so..."));
+    callInProgress = true;
+  } else {
+    Serial.println(">> Loi ATD: " + resp);
+    callInProgress = false;
+  }
+}
+
+// ======================== KẾT THÚC CUỘC GỌI ========================
+void hangUpCall() {
+  Serial.println(F(">> Dang ngat cuoc goi..."));
+  cleanSerialBuffer();
+
+  simSerial.println("ATH");
+  String resp = readModuleResponse(HANGUP_TIMEOUT);
+  if (resp.indexOf("OK") >= 0) {
+    Serial.println(F(">> Da gui ATH."));
+  } else {
+    simSerial.println("AT+CHUP");
+    resp = readModuleResponse(HANGUP_TIMEOUT);
+    if (resp.indexOf("OK") >= 0) {
+      Serial.println(F(">> Da gui AT+CHUP."));
+    }
+  }
+
+  delay(2000);
+
+  if (isCallActive()) {
+    Serial.println(F(">> Cuoc goi van chua ket thuc, thu lai AT+CHUP..."));
+    simSerial.println("AT+CHUP");
+    readModuleResponse(1000);
+  }
+
+  callInProgress = false;
+  Serial.println(F(">> Da dat lai trang thai.\n"));
+}
+
+// ======================== NÚT NHẤN CHỐNG DỘI ========================
+bool isButtonPressed() {
+  int reading = digitalRead(button.pin);
+  if (reading != button.lastState) button.lastDebounceTime = millis();
+  if ((millis() - button.lastDebounceTime) > button.debounceDelay) {
+    if (reading != button.currentState) {
+      button.currentState = reading;
+      if (button.currentState == LOW) return true;
+    }
+  }
+  button.lastState = reading;
+  return false;
 }
 ```
