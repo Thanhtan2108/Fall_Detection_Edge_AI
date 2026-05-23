@@ -67,6 +67,11 @@ unsigned long last_sample_ms    = 0;
 bool buzzer_on                   = false;
 bool alert_sent_for_current_fall = false;
 
+// [TC6] Cooldown giữa các lần trigger alert — tránh log nhiễu và
+//       triggerAlert() bị gọi liên tục khi inference dao động Fall/Normal
+constexpr unsigned long ALERT_COOLDOWN_MS = 10000; // 10 giây
+unsigned long last_alert_ms               = 0;
+
 // ============================================================
 //  NÚT NHẤN (DEBOUNCE)
 // ============================================================
@@ -86,6 +91,7 @@ String        simRxBuffer       = "";
 String        urcLineBuffer     = "";
 bool          moduleReady       = false;
 bool          callInProgress    = false;
+bool          simCmdSent        = false;
 
 // ============================================================
 //  FUNCTION PROTOTYPES
@@ -96,11 +102,24 @@ void handleButton();
 
 void simTask();
 void handleURC(const String& line);
-void triggerAlert();                    // Gọi khi AI phát hiện Fall
+void triggerAlert();
+void resetSimToIdle();              // [TC5] helper reset an toàn về IDLE
 
-String readModuleResponse(unsigned long timeoutMs);  // chỉ dùng trong setup
+String readModuleResponse(unsigned long timeoutMs);
 bool   waitForNetworkReady();
 void   cleanSerialBuffer();
+
+// ============================================================
+//  [TC5] HELPER — reset toàn bộ trạng thái SIM về IDLE an toàn
+//  Dùng thay cho mọi chỗ gán simState = SIM_IDLE trực tiếp,
+//  đảm bảo simCmdSent và callInProgress luôn được reset cùng lúc.
+// ============================================================
+void resetSimToIdle() {
+    simCmdSent     = false;
+    simRxBuffer    = "";
+    callInProgress = false;
+    simState       = SIM_IDLE;
+}
 
 // ============================================================
 //  SETUP
@@ -122,7 +141,7 @@ void setup() {
     if (!mpu.begin()) {
         Serial.println("MPU6050 not found! Halting.");
         while (true);
-    }    
+    }
     mpu.setAccelerometerRange(MPU6050_RANGE_16_G);
     mpu.setGyroRange(MPU6050_RANGE_500_DEG);
     mpu.setFilterBandwidth(MPU6050_BAND_10_HZ);
@@ -152,7 +171,7 @@ void loop() {
     // 1. Xử lý URC từ SIM module (đọc từng ký tự, không chờ)
     while (simSerial.available()) {
         char c = simSerial.read();
-        simRxBuffer += c;
+        simRxBuffer   += c;
         urcLineBuffer += c;
         if (c == '\n') {
             handleURC(urcLineBuffer);
@@ -216,8 +235,8 @@ void run_inference() {
     ei_impulse_result_t result = {0};
     if (run_classifier(&signal, &result, false) != EI_IMPULSE_OK) return;
 
-    float       max_conf  = 0;
-    const char* label     = "";
+    float       max_conf = 0;
+    const char* label    = "";
     for (int i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
         if (result.classification[i].value > max_conf) {
             max_conf = result.classification[i].value;
@@ -233,8 +252,12 @@ void run_inference() {
     Serial.printf("| %s\n", label);
 
     if (strcmp(label, "Fall") == 0 && max_conf >= FALL_THRESHOLD) {
-        if (!alert_sent_for_current_fall) {
+        // [TC6] Thêm check cooldown — tránh trigger liên tục khi inference
+        //       dao động Fall/Normal trong cùng một sự kiện té ngã
+        if (!alert_sent_for_current_fall &&
+            (millis() - last_alert_ms >= ALERT_COOLDOWN_MS)) {
             alert_sent_for_current_fall = true;
+            last_alert_ms               = millis();
             Serial.printf("FALL DETECTED (%.0f%%)!\n", max_conf * 100);
             triggerAlert();
         }
@@ -268,16 +291,11 @@ void triggerAlert() {
         simState          = SIM_SMS_INIT;
         Serial.println(">> SIM: Starting alert sequence (SMS → Call)");
     }
-    // Nếu simState != IDLE (đang xử lý sự kiện trước) → bỏ qua,
-    // còi đã kêu là đủ cho sự kiện này
 }
 
 // ============================================================
-//  SIM STATE MACHINE — fix hoàn chỉnh
+//  SIM STATE MACHINE
 // ============================================================
-
-bool simCmdSent = false;  // thêm biến này vào global
-
 void simTask() {
     unsigned long now = millis();
 
@@ -288,15 +306,15 @@ void simTask() {
                 simRxBuffer = "";
                 simSerial.println("AT+CMGF=1");
                 simStateStartTime = now;
-                simCmdSent = true;
+                simCmdSent        = true;
                 Serial.println(">> SIM: AT+CMGF=1 sent");
             }
             if (simRxBuffer.indexOf("OK") >= 0) {
                 Serial.println(">> SIM: CMGF OK");
-                simCmdSent = false;
-                simRxBuffer = "";
+                simCmdSent        = false;
+                simRxBuffer       = "";
                 simStateStartTime = now;
-                simState = SIM_SMS_SEND;
+                simState          = SIM_SMS_SEND;
             } else if (now - simStateStartTime > 3000) {
                 Serial.println(">> SIM: CMGF timeout, retry");
                 simCmdSent = false;
@@ -308,21 +326,21 @@ void simTask() {
                 simRxBuffer = "";
                 simSerial.println("AT+CMGS=\"" PHONE_NUMBER "\"");
                 simStateStartTime = now;
-                simCmdSent = true;
+                simCmdSent        = true;
                 Serial.println(">> SIM: AT+CMGS sent, waiting '>'");
             }
             if (simRxBuffer.indexOf('>') >= 0) {
                 Serial.println(">> SIM: Got '>'. Sending body...");
-                simCmdSent = false;
-                simRxBuffer = "";
+                simCmdSent        = false;
+                simRxBuffer       = "";
                 simStateStartTime = now;
-                simState = SIM_SMS_BODY;
+                simState          = SIM_SMS_BODY;
             } else if (now - simStateStartTime > 5000) {
                 Serial.println(">> SIM: No '>' timeout, skip to call");
-                simCmdSent = false;
-                simRxBuffer = "";
+                simCmdSent        = false;
+                simRxBuffer       = "";
                 simStateStartTime = now;
-                simState = SIM_CALL_DIAL;
+                simState          = SIM_CALL_DIAL;
             }
             break;
 
@@ -332,22 +350,22 @@ void simTask() {
                 delay(50);
                 simSerial.write(0x1A);
                 simStateStartTime = now;
-                simCmdSent = true;
+                simCmdSent        = true;
                 Serial.println(">> SIM: SMS body + Ctrl+Z sent, waiting +CMGS");
             }
             if (simRxBuffer.indexOf("+CMGS:") >= 0) {
                 Serial.println(">> SIM: SMS sent OK!");
-                simCmdSent = false;
-                simRxBuffer = "";
+                simCmdSent        = false;
+                simRxBuffer       = "";
                 simStateStartTime = now;
-                simState = SIM_CALL_DIAL;
+                simState          = SIM_CALL_DIAL;
             } else if (simRxBuffer.indexOf("ERROR") >= 0 ||
                        now - simStateStartTime > SIM_STATE_TIMEOUT_SMS) {
                 Serial.println(">> SIM: SMS failed/timeout, proceed to call");
-                simCmdSent = false;
-                simRxBuffer = "";
+                simCmdSent        = false;
+                simRxBuffer       = "";
                 simStateStartTime = now;
-                simState = SIM_CALL_DIAL;
+                simState          = SIM_CALL_DIAL;
             }
             break;
 
@@ -356,20 +374,20 @@ void simTask() {
                 simRxBuffer = "";
                 simSerial.println("ATD" PHONE_NUMBER ";");
                 simStateStartTime = now;
-                simCmdSent = true;
+                simCmdSent        = true;
                 Serial.println(">> SIM: ATD sent, dialing...");
             }
             if (simRxBuffer.indexOf("OK") >= 0) {
                 Serial.println(">> SIM: Call dialing OK");
-                simCmdSent = false;
-                simRxBuffer = "";
+                simCmdSent        = false;
+                simRxBuffer       = "";
                 simStateStartTime = now;
-                simState = SIM_CALL_ACTIVE;
+                simState          = SIM_CALL_ACTIVE;
             } else if (now - simStateStartTime > SIM_STATE_TIMEOUT_ATD) {
                 Serial.println(">> SIM: ATD timeout");
-                simCmdSent = false;
-                simRxBuffer = "";
-                simState = SIM_IDLE;
+                // [TC5] Dùng resetSimToIdle() thay vì gán trực tiếp
+                //       để đảm bảo simCmdSent và callInProgress được reset
+                resetSimToIdle();
             }
             break;
 
@@ -379,7 +397,7 @@ void simTask() {
             if (now - simStateStartTime > 60000UL) {
                 Serial.println(">> SIM: Call timeout, hanging up");
                 simCmdSent = false;
-                simState = SIM_HANGUP;
+                simState   = SIM_HANGUP;
             }
             break;
 
@@ -387,16 +405,14 @@ void simTask() {
             if (!simCmdSent) {
                 simSerial.println("ATH");
                 simStateStartTime = now;
-                simCmdSent = true;
+                simCmdSent        = true;
                 Serial.println(">> SIM: ATH sent");
             }
             if (simRxBuffer.indexOf("OK") >= 0 ||
                 now - simStateStartTime > SIM_STATE_TIMEOUT_ATH) {
                 Serial.println(">> SIM: Hangup done. IDLE.");
-                simCmdSent = false;
-                simRxBuffer = "";
-                callInProgress = false;
-                simState = SIM_IDLE;
+                // [TC5] Dùng resetSimToIdle() thay vì gán từng biến rời
+                resetSimToIdle();
             }
             break;
 
@@ -408,32 +424,30 @@ void simTask() {
 
 // ============================================================
 //  URC HANDLER — nhận thông báo chủ động từ module
+//  [TC7] Dùng startsWith / exact match thay vì indexOf
+//        để tránh false positive với nội dung SMS từ nhà mạng
 // ============================================================
 void handleURC(const String& raw) {
     String line = raw;
     line.trim();
     if (line.isEmpty()) return;
 
-    if (line.indexOf("VOICE CALL: BEGIN") >= 0) {
+    if (line.startsWith("VOICE CALL: BEGIN")) {
         Serial.println(">> URC: Call connected.");
         callInProgress = true;
-        // Đang ở SIM_CALL_ACTIVE — giữ nguyên, chờ kết thúc
     }
-    else if (line.indexOf("VOICE CALL: END") >= 0 ||
-             line.indexOf("NO CARRIER")      >= 0) {
+    else if (line.startsWith("VOICE CALL: END") || line == "NO CARRIER") {
         Serial.println(">> URC: Call ended.");
-        callInProgress = false;
-        if (simState == SIM_CALL_ACTIVE) simState = SIM_IDLE;
+        // [TC5] Dùng resetSimToIdle() — reset simCmdSent cùng lúc
+        if (simState == SIM_CALL_ACTIVE) resetSimToIdle();
     }
-    else if (line.indexOf("BUSY") >= 0) {
+    else if (line == "BUSY") {
         Serial.println(">> URC: Busy.");
-        callInProgress = false;
-        if (simState == SIM_CALL_ACTIVE) simState = SIM_IDLE;
+        if (simState == SIM_CALL_ACTIVE) resetSimToIdle();
     }
-    else if (line.indexOf("NO ANSWER") >= 0) {
+    else if (line == "NO ANSWER") {
         Serial.println(">> URC: No answer.");
-        callInProgress = false;
-        if (simState == SIM_CALL_ACTIVE) simState = SIM_IDLE;
+        if (simState == SIM_CALL_ACTIVE) resetSimToIdle();
     }
 }
 
@@ -444,8 +458,8 @@ void handleURC(const String& raw) {
 //  - Nếu đang có cuộc gọi active → hangup sau khi còi tắt
 // ============================================================
 void handleButton() {
-    unsigned long now = millis();
-    bool reading = digitalRead(BUTTON_PIN);
+    unsigned long now     = millis();
+    bool          reading = digitalRead(BUTTON_PIN);
 
     if (reading != lastButtonState) lastDebounceTime = now;
     lastButtonState = reading;
@@ -459,19 +473,21 @@ void handleButton() {
                 if (buzzer_on) {
                     // Tắt còi
                     digitalWrite(BUZZER_PIN, LOW);
-                    buzzer_on = false;
+                    buzzer_on                   = false;
                     alert_sent_for_current_fall = true;
                     Serial.println(">> BUZZER OFF by button");
 
                     // Nếu cuộc gọi đang active thì cúp máy
                     if (callInProgress) {
                         Serial.println(">> Hanging up active call...");
-                        simState = SIM_HANGUP;
+                        simCmdSent = false;
+                        simState   = SIM_HANGUP;
                     }
                 } else {
                     // Bật còi thủ công
                     digitalWrite(BUZZER_PIN, HIGH);
-                    buzzer_on = true;
+                    buzzer_on                   = true;
+                    alert_sent_for_current_fall = true; // tránh AI trigger SMS/gọi
                     Serial.println(">> BUZZER ON by button");
                 }
             }
@@ -489,7 +505,7 @@ void cleanSerialBuffer() {
 }
 
 String readModuleResponse(unsigned long timeoutMs) {
-    String resp;
+    String        resp;
     unsigned long start = millis();
     while (millis() - start < timeoutMs) {
         while (simSerial.available()) {
