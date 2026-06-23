@@ -206,7 +206,7 @@ void loop() {
             stride_count = 0;
             Serial.println("Buffer full — starting inference!");
             run_inference();
-        }
+        } 
         return;
     }
 
