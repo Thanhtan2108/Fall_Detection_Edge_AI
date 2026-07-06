@@ -33,11 +33,11 @@
 #define PHONE_NUMBER        "+84833538486"
 #define SMS_MESSAGE         "CANH BAO: Phat hien te nga! Can kiem tra ngay!"
 
-constexpr unsigned long NETWORK_READY_TIMEOUT = 60000;
-constexpr unsigned long AT_RESPONSE_TIMEOUT   = 1000;
-constexpr unsigned long SIM_STATE_TIMEOUT_SMS = 15000;
-constexpr unsigned long SIM_STATE_TIMEOUT_ATD = 10000;
-constexpr unsigned long SIM_STATE_TIMEOUT_ATH = 3000;
+constexpr unsigned long NETWORK_READY_TIMEOUT = 60000; // 1p
+constexpr unsigned long AT_RESPONSE_TIMEOUT   = 1000; // 1s
+constexpr unsigned long SIM_STATE_TIMEOUT_SMS = 15000; // 15s
+constexpr unsigned long SIM_STATE_TIMEOUT_ATD = 10000; // 10s
+constexpr unsigned long SIM_STATE_TIMEOUT_ATH = 3000; // 3s
 
 // ============================================================
 //  SIM STATE MACHINE
@@ -58,7 +58,7 @@ enum SimState {
 // ============================================================
 Adafruit_MPU6050 mpu;
 
-float         features[WINDOW_FLOATS];
+float         features[WINDOW_FLOATS]; //buffer chứa 186 mẫu
 int           samples_collected = 0;
 bool          buffer_full       = false;
 int           stride_count      = 0;
@@ -78,7 +78,7 @@ unsigned long last_alert_ms               = 0;
 bool                    lastButtonState         = HIGH;
 bool                    stableButtonState       = HIGH;
 unsigned long           lastDebounceTime        = 0;
-constexpr unsigned long DEBOUNCE_DELAY_MS       = 50;
+constexpr unsigned long DEBOUNCE_DELAY_MS       = 50; // 50ms
 
 // ============================================================
 //  GLOBAL VARIABLES — SIM
@@ -96,8 +96,8 @@ bool          simCmdSent        = false;
 // ============================================================
 //  FUNCTION PROTOTYPES
 // ============================================================
-int  get_signal_data(size_t offset, size_t length, float* out_ptr);
-void run_inference();
+int  get_signal_data(size_t offset, size_t length, float* out_ptr); // lấy dữ liệu cảm biến từ buffer
+void run_inference(); // chạy suy luận
 void handleButton();
 
 void simTask();
